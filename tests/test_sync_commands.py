@@ -216,9 +216,7 @@ def test_pull_updates_resources_and_preserves_local_only_fields(tmp_path: Path) 
         "cxx",
         {"flags": ["-O2"]},
     )
-    assert testset.judge == JudgeConfig(
-        "cpp17", "custom-judge.cpp", "cxx", {"flags": ["-O2"]}
-    )
+    assert testset.judge == JudgeConfig("cpp17", "custom-judge.cpp", "cxx", {"flags": ["-O2"]})
     assert (problem_path / "tests" / "custom-generator.cpp").read_text() == "new generator\n"
     assert (problem_path / "tests" / "custom-judge.cpp").read_text() == "old judge\n"
     assert result.applied
@@ -255,9 +253,7 @@ def test_pull_preserves_bom_crlf_and_unmanaged_problem_and_testset_text(
     (problem_path / "PROBLEM").write_bytes(problem_source.encode("utf-8"))
     (problem_path / "tests" / "TESTSET").write_bytes(testset_source.encode("utf-8"))
     project = load_project(tmp_path)
-    remote = client(
-        generator=GeneratorContent("cpp20", "new generator\n", True, 8)
-    )
+    remote = client(generator=GeneratorContent("cpp20", "new generator\n", True, 8))
 
     sync.pull(project, factory(remote))
 
@@ -384,6 +380,65 @@ def test_testcase_accept_replaces_exact_snapshot(tmp_path: Path) -> None:
     assert result.problems[0].testcases_applied
 
 
+def test_project_pull_with_testcases_keeps_all_staged_snapshots_available(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "PROJECT").write_text(
+        render_project_block(ProjectConfig(rime_out_dir="generated")),
+        encoding="utf-8",
+    )
+    first = add_problem(tmp_path, "a", 1)
+    second = add_problem(tmp_path, "b", 2)
+    project = load_project(tmp_path)
+    clients = {
+        1: client(
+            problem_id=1,
+            cases={
+                ("in", "first.bin"): b"first-in\x00",
+                ("out", "first.bin"): b"first-out\xff",
+            },
+        ),
+        2: client(
+            problem_id=2,
+            cases={
+                ("in", "second.bin"): b"second-in\xfe",
+                ("out", "second.bin"): b"second-out\x00",
+            },
+        ),
+    }
+
+    def before_last_fetch(value: str) -> None:
+        if value == "get-out-second.bin":
+            assert not (first / "generated" / "tests").exists()
+
+    clients[2].on_call = before_last_fetch
+    result = sync.pull(
+        project,
+        lambda problem: clients[problem.problem_id],
+        include_testcases=True,
+    )
+
+    assert result.applied
+    assert (first / "generated" / "tests" / "first.bin.in").read_bytes() == b"first-in\x00"
+    assert (first / "generated" / "tests" / "first.bin.diff").read_bytes() == b"first-out\xff"
+    assert (second / "generated" / "tests" / "second.bin.in").read_bytes() == b"second-in\xfe"
+    assert (
+        second / "generated" / "tests" / "second.bin.diff"
+    ).read_bytes() == b"second-out\x00"
+    assert clients[1].calls[-4:] == [
+        "list-in",
+        "list-out",
+        "get-in-first.bin",
+        "get-out-first.bin",
+    ]
+    assert clients[2].calls[-4:] == [
+        "list-in",
+        "list-out",
+        "get-in-second.bin",
+        "get-out-second.bin",
+    ]
+
+
 def test_diff_is_structured_and_strictly_read_only(tmp_path: Path) -> None:
     project = make_project(tmp_path)
     problem = project.problems[0].path
@@ -404,10 +459,13 @@ def test_diff_is_structured_and_strictly_read_only(tmp_path: Path) -> None:
     assert result.has_changes
     assert any(entry.resource == "settings.title" for entry in result.problems[0].entries)
     assert any(
-        entry.resource == "statement" and entry.unified
+        entry.resource == "statement" and entry.unified for entry in result.problems[0].entries
+    )
+    assert any(
+        entry.resource == "testcase sample" and entry.detail == "raw bytes differ"
         for entry in result.problems[0].entries
     )
-    assert any("raw bytes differ" in line for line in result.lines)
+    assert remote.calls[-4:] == ["list-in", "list-out", "get-in-sample", "get-out-sample"]
     assert file_snapshot(tmp_path) == before
 
 

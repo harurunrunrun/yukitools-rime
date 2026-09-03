@@ -23,6 +23,14 @@ def display_path(path: Path) -> str:
         return str(path)
 
 
+def discard_tree(path: Path) -> None:
+    """Best-effort cleanup that cannot invalidate an already committed swap."""
+
+    # Ctrl-C during cleanup must not look like a failed atomic operation.
+    with suppress(BaseException):
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def normalize_text(text: str) -> str:
     """Remove a leading UTF-8 BOM marker and normalize newlines to LF."""
 
@@ -101,9 +109,7 @@ def atomic_write_bytes(
     fd = -1
     temporary: Path | None = None
     try:
-        fd, raw_temporary = tempfile.mkstemp(
-            dir=parent, prefix=f".{path.name}.", suffix=".tmp"
-        )
+        fd, raw_temporary = tempfile.mkstemp(dir=parent, prefix=f".{path.name}.", suffix=".tmp")
         temporary = Path(raw_temporary)
         with os.fdopen(fd, "wb") as stream:
             fd = -1
@@ -175,9 +181,7 @@ def require_regular_file(root: Path, name: str, *, label: str = "source") -> Pat
     name = validate_basename(name, label=label)
     lexical_path = Path(root).resolve(strict=False) / name
     if lexical_path.is_symlink():
-        raise FileOperationError(
-            f"{label} is not a regular file: {display_path(lexical_path)}"
-        )
+        raise FileOperationError(f"{label} is not a regular file: {display_path(lexical_path)}")
     path = ensure_within(root, lexical_path, label=label)
     if not path.is_file():
         raise FileOperationError(f"{label} is not a regular file: {display_path(path)}")
@@ -213,9 +217,7 @@ def replace_directory_snapshot(
     try:
         parent.mkdir(parents=True, exist_ok=True)
         if parent.is_symlink() or not parent.is_dir():
-            raise FileOperationError(
-                f"parent is not a regular directory: {display_path(parent)}"
-            )
+            raise FileOperationError(f"parent is not a regular directory: {display_path(parent)}")
         if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
             raise FileOperationError(
                 f"snapshot target is not a regular directory: {display_path(directory)}"
@@ -236,42 +238,39 @@ def replace_directory_snapshot(
     stage = Path(tempfile.mkdtemp(dir=parent, prefix=f".{directory.name}.stage-"))
     backup = Path(tempfile.mkdtemp(dir=parent, prefix=f".{directory.name}.backup-"))
     backup.rmdir()
-    moved_old = False
-    installed_new = False
     try:
         for name, content in validated.items():
             atomic_write_bytes(stage / name, content, create_parents=False)
         if directory.exists():
             os.replace(directory, backup)
-            moved_old = True
         os.replace(stage, directory)
-        installed_new = True
-        if moved_old:
-            shutil.rmtree(backup)
-            moved_old = False
-    except (OSError, FileOperationError) as exc:
+        if backup.exists():
+            discard_tree(backup)
+    except BaseException as exc:
+        # A missing stage plus an installed target proves the final replace
+        # committed, even if Ctrl-C arrived before the next Python bytecode.
+        if not stage.exists() and directory.exists():
+            if backup.exists():
+                discard_tree(backup)
+            return
         rollback_error: OSError | None = None
-        if installed_new:
-            try:
-                shutil.rmtree(directory)
-                installed_new = False
-            except OSError as rollback_exc:
-                rollback_error = rollback_exc
-        if moved_old and not directory.exists():
+        if not directory.exists() and backup.exists():
             try:
                 os.replace(backup, directory)
-                moved_old = False
             except OSError as rollback_exc:
-                rollback_error = rollback_error or rollback_exc
+                rollback_error = rollback_exc
+        if not isinstance(exc, Exception) and rollback_error is None:
+            raise
         detail = f": rollback also failed: {rollback_error}" if rollback_error else ""
         raise FileOperationError(
             f"could not replace snapshot {display_path(directory)}: {exc}{detail}"
         ) from exc
     finally:
+        committed = not stage.exists() and directory.exists()
         if stage.exists():
-            shutil.rmtree(stage, ignore_errors=True)
-        if backup.exists() and not moved_old:
-            shutil.rmtree(backup, ignore_errors=True)
+            discard_tree(stage)
+        if backup.exists() and committed:
+            discard_tree(backup)
 
 
 __all__ = [

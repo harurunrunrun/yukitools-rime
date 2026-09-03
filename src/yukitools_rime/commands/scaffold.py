@@ -7,6 +7,7 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
@@ -52,7 +53,7 @@ from yukitools_rime.rime_config import (
 from yukitools_rime.testcase_sync import (
     TestcaseAPI,
     TestcaseSnapshot,
-    fetch_remote_snapshot,
+    fetch_remote_snapshot_to,
     replace_local_snapshot,
 )
 
@@ -70,13 +71,9 @@ _ENV_EXAMPLE = """# Copy this file to .env and add one or more credentials.
 # YUKICODER_API_KEY=xxxxxxxxxxxxxxxxxxxx
 """
 
+
 def _gitignore_block(config: ProjectConfig) -> str:
-    return (
-        f"{BEGIN_MARKER}\n"
-        ".env\n"
-        f"{config.rime_out_dir}/\n"
-        f"{END_MARKER}\n"
-    )
+    return f"{BEGIN_MARKER}\n.env\n{config.rime_out_dir}/\n{END_MARKER}\n"
 
 
 class ScaffoldClient(Protocol):
@@ -118,6 +115,33 @@ def _preflight_optional_file(path: Path) -> None:
         raise FileOperationError(f"not a regular file: {path}")
 
 
+def _validate_existing_output_directories(
+    root: Path,
+    project_config: ProjectConfig,
+) -> None:
+    try:
+        children = tuple(root.iterdir())
+    except OSError as exc:
+        raise FileOperationError(f"could not inspect project directory {root}: {exc}") from exc
+    for child in children:
+        problem_file = child / "PROBLEM"
+        if child.is_symlink():
+            if child.is_dir() and problem_file.is_file():
+                raise ConfigError(f"symlink Rime problem is not allowed: {child}")
+            continue
+        if not child.is_dir():
+            continue
+        if not problem_file.is_file() or problem_file.is_symlink():
+            continue
+        output = child / project_config.rime_out_dir
+        if output.is_symlink() or (output.exists() and not output.is_dir()):
+            raise ConfigError(f"unsafe Rime output path: {output}")
+        for config_name in ("PROBLEM", "TESTSET", "SOLUTION"):
+            config_path = output / config_name
+            if config_path.exists() or config_path.is_symlink():
+                raise ConfigError(f"rime_out_dir collides with a Rime source directory: {output}")
+
+
 def init_project(path: str | Path) -> ProjectLayout:
     """Create or augment a Rime project without invoking Git or any network API."""
 
@@ -141,12 +165,11 @@ def init_project(path: str | Path) -> ProjectLayout:
     project_source = _read_optional_file(project_path)
     if extract_managed_block(project_source) is None:
         if contains_declaration(project_source, "yukicoder_project"):
-            raise ConfigError(
-                "yukicoder_project() exists outside a managed configuration block"
-            )
+            raise ConfigError("yukicoder_project() exists outside a managed configuration block")
         project_config = ProjectConfig()
     else:
         project_config = parse_project_config(project_source)
+    _validate_existing_output_directories(root, project_config)
     updated_project = upsert_managed_block_at_end(
         project_source,
         render_project_block(project_config),
@@ -154,7 +177,7 @@ def init_project(path: str | Path) -> ProjectLayout:
 
     ignore_source = _read_optional_file(ignore_path)
     updated_ignore = upsert_managed_block(
-        ignore_source, _gitignore_block(project_config)
+        ignore_source, _gitignore_block(project_config), python_source=False
     )
 
     if updated_project != project_source:
@@ -205,6 +228,7 @@ def _problem_resources(
     client: ScaffoldClient,
     *,
     include_testcases: bool,
+    testcase_stage: Path | None,
 ) -> tuple[
     ProblemConfig,
     Statement,
@@ -264,11 +288,12 @@ def _problem_resources(
             )
             judge_source = remote_judge.source
 
-    testcases = (
-        fetch_remote_snapshot(cast(TestcaseAPI, client), problem_id)
-        if include_testcases
-        else None
-    )
+    if include_testcases:
+        if testcase_stage is None:
+            raise ValueError("testcase staging is required when fetching testcases")
+        testcases = fetch_remote_snapshot_to(cast(TestcaseAPI, client), problem_id, testcase_stage)
+    else:
+        testcases = None
     return (
         problem,
         statement,
@@ -320,7 +345,8 @@ def _write_problem_stage(
     # Write the discovery marker last so concurrent readers never accept an
     # incomplete staged problem as a direct-child target.
     write_config_atomic(stage / "PROBLEM", render_problem_block(problem))
-    load_problem(stage)
+    staged_problem = load_problem(stage)
+    staged_problem.output_dir(project_config)
 
 
 def new_problem(
@@ -335,46 +361,61 @@ def new_problem(
     if isinstance(problem_id, bool) or not isinstance(problem_id, int) or problem_id < 1:
         raise ValidationError("problem_id must be a positive integer")
     project = load_project(project_path)
+    reserved_output_names = {"problem", "tests", "statement.md", "statement.html"}
+    if project.config.rime_out_dir.casefold() in reserved_output_names:
+        raise ConflictError(
+            "rime_out_dir conflicts with a source path created by new: "
+            f"{project.config.rime_out_dir}"
+        )
     directory_name = str(problem_id) if dir_name is None else dir_name
     target = safe_child(project.root, directory_name, label="problem directory")
     if target.exists() or target.is_symlink():
         raise ConflictError(f"problem directory already exists: {target}")
     for existing in project.problems:
         if existing.problem_id == problem_id:
-            raise ConflictError(
-                f"problem {problem_id} already exists at {existing.path}"
-            )
+            raise ConflictError(f"problem {problem_id} already exists at {existing.path}")
 
-    client = client_factory(project.root, project.config, problem_id)
-    try:
-        resources = _problem_resources(
-            problem_id,
-            directory_name,
-            client,
-            include_testcases=include_testcases,
-        )
-    finally:
-        _close_client(client)
-
-    stage: Path | None = None
-    try:
-        stage = Path(
-            tempfile.mkdtemp(
-                dir=project.root,
-                prefix=f".{directory_name}.stage-",
+    with ExitStack() as testcase_staging:
+        testcase_stage = (
+            Path(
+                testcase_staging.enter_context(
+                    tempfile.TemporaryDirectory(prefix="yukitools-rime-new-")
+                )
             )
+            if include_testcases
+            else None
         )
-        _write_problem_stage(stage, *resources, project.config)
-        if target.exists() or target.is_symlink():
-            raise ConflictError(f"problem directory appeared during creation: {target}")
-        os.replace(stage, target)
-        stage = None
-    except (OSError, LayoutError) as exc:
-        raise FileOperationError(f"could not create problem directory {target}: {exc}") from exc
-    finally:
-        if stage is not None:
-            shutil.rmtree(stage, ignore_errors=True)
-    return load_problem(target)
+        client = client_factory(project.root, project.config, problem_id)
+        try:
+            resources = _problem_resources(
+                problem_id,
+                directory_name,
+                client,
+                include_testcases=include_testcases,
+                testcase_stage=testcase_stage,
+            )
+        finally:
+            _close_client(client)
+
+        stage: Path | None = None
+        try:
+            stage = Path(
+                tempfile.mkdtemp(
+                    dir=project.root,
+                    prefix=f".{directory_name}.stage-",
+                )
+            )
+            _write_problem_stage(stage, *resources, project.config)
+            if target.exists() or target.is_symlink():
+                raise ConflictError(f"problem directory appeared during creation: {target}")
+            os.replace(stage, target)
+            stage = None
+        except (OSError, LayoutError) as exc:
+            raise FileOperationError(f"could not create problem directory {target}: {exc}") from exc
+        finally:
+            if stage is not None:
+                shutil.rmtree(stage, ignore_errors=True)
+        return load_problem(target)
 
 
 __all__ = [

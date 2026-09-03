@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import difflib
+import tempfile
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Protocol, TypeAlias
@@ -27,7 +29,7 @@ from yukitools_rime.layout import (
     ProjectLayout,
     TargetSelection,
     discover_project,
-    read_testcases,
+    inspect_testcases,
 )
 from yukitools_rime.models import (
     GeneratorConfig,
@@ -50,7 +52,7 @@ from yukitools_rime.testcase_sync import (
     TestcaseAPI,
     TestcaseSnapshot,
     compare_snapshots,
-    fetch_remote_snapshot,
+    fetch_remote_snapshot_to,
     replace_local_snapshot,
 )
 
@@ -180,6 +182,7 @@ def _selected_problems(target: SyncTarget) -> tuple[ProblemLayout, ...]:
         return (target,)
     return target.problems
 
+
 def _project_config(target: SyncTarget) -> ProjectConfig:
     if isinstance(target, ProjectLayout):
         return target.config
@@ -188,12 +191,12 @@ def _project_config(target: SyncTarget) -> ProjectConfig:
     return discover_project(target.path).config
 
 
-
 def _fetch_remote(
     target: SyncTarget,
     client_factory: ClientFactory,
     *,
     include_testcases: bool,
+    testcase_staging: ExitStack | None = None,
 ) -> tuple[_RemoteProblem, ...]:
     """Fetch every requested resource for every target before local mutation."""
 
@@ -209,14 +212,18 @@ def _fetch_remote(
         generator = client.get_generator(problem.problem_id)
         judge = client.get_judge_code(problem.problem_id)
         editorial = client.get_editorial(problem.problem_id)
-        testcases = (
-            fetch_remote_snapshot(client, problem.problem_id)
-            if include_testcases
-            else None
-        )
-        fetched.append(
-            _RemoteProblem(problem, edit, generator, judge, editorial, testcases)
-        )
+        if include_testcases:
+            if testcase_staging is None:
+                raise ValueError("testcase staging is required when fetching testcases")
+            staging_directory = Path(
+                testcase_staging.enter_context(
+                    tempfile.TemporaryDirectory(prefix=f"yukitools-rime-{problem.problem_id}-")
+                )
+            )
+            testcases = fetch_remote_snapshot_to(client, problem.problem_id, staging_directory)
+        else:
+            testcases = None
+        fetched.append(_RemoteProblem(problem, edit, generator, judge, editorial, testcases))
     return tuple(fetched)
 
 
@@ -314,6 +321,15 @@ def _update_document(
 def _testset_state(problem: ProblemLayout) -> tuple[Path, str, TestsetConfig]:
     if problem.testset is None:
         path = problem.path / "tests"
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise ConflictError(f"cannot create TESTSET at unsafe path: {path}")
+        if path.exists():
+            try:
+                entries = tuple(path.iterdir())
+            except OSError as exc:
+                raise FileOperationError(f"cannot inspect TESTSET directory {path}: {exc}") from exc
+            if entries:
+                raise ConflictError(f"cannot create managed TESTSET in non-empty directory: {path}")
         return path, "", TestsetConfig()
     path = problem.testset.path
     source = read_config_source(path / "TESTSET")
@@ -321,8 +337,10 @@ def _testset_state(problem: ProblemLayout) -> tuple[Path, str, TestsetConfig]:
 
 
 def _testcase_directory(problem: ProblemLayout, project_config: ProjectConfig) -> Path:
-    testset_name = problem.testset.path.name if problem.testset is not None else "tests"
-    return problem.path / project_config.rime_out_dir / testset_name
+    return problem.testcase_dir(
+        project_config,
+        default_testset_name="tests",
+    )
 
 
 def _plan_testcases(
@@ -334,8 +352,12 @@ def _plan_testcases(
         return None, False, None
     directory = _testcase_directory(remote.problem, project_config)
     existed = directory.is_dir() and not directory.is_symlink()
-    local = read_testcases(directory, require_nonempty=False) if existed else {}
-    changes = compare_snapshots(local, remote.testcases)
+    incomplete: tuple[str, ...] = ()
+    local: TestcaseSnapshot = {}
+    if existed:
+        local, missing_outputs, missing_inputs = inspect_testcases(directory)
+        incomplete = missing_outputs + missing_inputs
+    changes = compare_snapshots(local, remote.testcases, incomplete=incomplete)
     if not changes.has_changes:
         return changes, False, directory
     if existed:
@@ -365,9 +387,7 @@ def _build_pull_plan(
         rime_id=local_problem.rime_id,
     )
     merged = merge_remote_problem(local_problem, remote_problem)
-    rendered_problem = upsert_managed_block(
-        problem_source, render_problem_block(merged)
-    )
+    rendered_problem = upsert_managed_block(problem_source, render_problem_block(merged))
     _append_mutation(
         mutations,
         problem.config_path,
@@ -399,10 +419,13 @@ def _build_pull_plan(
             rime_kind=existing.rime_kind if existing else infer_rime_kind(generator.lang_id),
             rime_options=dict(existing.rime_options) if existing else {},
         )
+        source_path = testset_path / config.src
+        if existing is None and (source_path.exists() or source_path.is_symlink()):
+            raise ConflictError(f"refusing to overwrite existing generator source: {source_path}")
         testset.generator = config
         _append_mutation(
             mutations,
-            testset_path / config.src,
+            source_path,
             normalize_text(generator.source).encode("utf-8"),
         )
 
@@ -419,26 +442,27 @@ def _build_pull_plan(
                 else default_source_name("judge", judge.lang_id)
             ),
             rime_kind=(
-                existing_judge.rime_kind
-                if existing_judge
-                else infer_rime_kind(judge.lang_id)
+                existing_judge.rime_kind if existing_judge else infer_rime_kind(judge.lang_id)
             ),
             rime_options=dict(existing_judge.rime_options) if existing_judge else {},
         )
         testset.judge = judge_config
+        judge_source_path = testset_path / judge_config.src
+        if existing_judge is None and (
+            judge_source_path.exists() or judge_source_path.is_symlink()
+        ):
+            raise ConflictError(f"refusing to overwrite existing judge source: {judge_source_path}")
         _append_mutation(
             mutations,
-            testset_path / judge_config.src,
+            judge_source_path,
             normalize_text(judge.source).encode("utf-8"),
         )
 
-    needs_testset_for_cases = (
-        problem.testset is None and remote.testcases is not None and bool(remote.testcases)
-    )
+    testset = TestsetConfig(testset.generator, testset.judge)
+    needs_testset_for_cases = problem.testset is None and remote.testcases is not None
+
     if testset != original_testset or needs_testset_for_cases:
-        rendered_testset = upsert_managed_block(
-            testset_source, render_testset_block(testset)
-        )
+        rendered_testset = upsert_managed_block(testset_source, render_testset_block(testset))
         _append_mutation(
             mutations,
             testset_path / "TESTSET",
@@ -456,11 +480,7 @@ def _build_pull_plan(
     testcase_changes, apply_testcases, testcase_dir = _plan_testcases(
         remote, project_config, confirm
     )
-    if (
-        testcase_changes is not None
-        and testcase_changes.has_changes
-        and not apply_testcases
-    ):
+    if testcase_changes is not None and testcase_changes.has_changes and not apply_testcases:
         warnings.append(f"problem {problem.problem_id}: testcase replacement was declined")
     return _PullPlan(
         remote,
@@ -485,9 +505,7 @@ def _restore_mutations(
                 atomic_write_bytes(path, previous)
         except Exception as exc:  # pragma: no cover - catastrophic filesystem failure
             rollback_error = rollback_error or exc
-    for directory in sorted(
-        created_dirs, key=lambda path: len(path.parts), reverse=True
-    ):
+    for directory in sorted(created_dirs, key=lambda path: len(path.parts), reverse=True):
         try:
             directory.rmdir()
         except FileNotFoundError:
@@ -523,7 +541,7 @@ def _apply_mutations(
                 remove_file(mutation.path)
             else:
                 atomic_write_bytes(mutation.path, mutation.data)
-    except Exception as error:
+    except BaseException as error:
         rollback_error = _restore_mutations(backups, created_dirs)
         if rollback_error is not None:
             raise FileOperationError(
@@ -542,43 +560,47 @@ def pull(
 ) -> PullResult:
     """Fetch first, then transactionally apply each selected problem."""
 
-    remote_problems = _fetch_remote(
-        target, client_factory, include_testcases=include_testcases
-    )
-    project_config = _project_config(target)
-    plans = tuple(
-        _build_pull_plan(remote, project_config, confirm) for remote in remote_problems
-    )
-    results: list[PullProblemResult] = []
-    for plan in plans:
-        backups, created_dirs = _apply_mutations(plan.mutations)
-        if plan.apply_testcases:
-            assert plan.testcase_dir is not None
-            assert plan.remote.testcases is not None
-            try:
-                replace_local_snapshot(plan.testcase_dir, plan.remote.testcases)
-            except Exception as error:
-                rollback_error = _restore_mutations(backups, created_dirs)
-                if rollback_error is not None:
-                    raise FileOperationError(
-                        "testcase replacement failed and regular-file rollback "
-                        f"also failed: {rollback_error}"
-                    ) from error
-                raise
-        changed_paths = tuple(mutation.path for mutation in plan.mutations)
-        if plan.apply_testcases and plan.testcase_dir is not None:
-            changed_paths += (plan.testcase_dir,)
-        results.append(
-            PullProblemResult(
-                plan.remote.problem.problem_id,
-                plan.remote.problem.path,
-                changed_paths,
-                plan.warnings,
-                plan.testcase_changes,
-                plan.apply_testcases,
-            )
+    with ExitStack() as testcase_staging:
+        remote_problems = _fetch_remote(
+            target,
+            client_factory,
+            include_testcases=include_testcases,
+            testcase_staging=testcase_staging,
         )
-    return PullResult(tuple(results))
+        project_config = _project_config(target)
+        plans = tuple(
+            _build_pull_plan(remote, project_config, confirm) for remote in remote_problems
+        )
+        results: list[PullProblemResult] = []
+        for plan in plans:
+            backups, created_dirs = _apply_mutations(plan.mutations)
+            if plan.apply_testcases:
+                assert plan.testcase_dir is not None
+                assert plan.remote.testcases is not None
+                try:
+                    replace_local_snapshot(plan.testcase_dir, plan.remote.testcases)
+                except BaseException as error:
+                    rollback_error = _restore_mutations(backups, created_dirs)
+                    if rollback_error is not None:
+                        raise FileOperationError(
+                            "testcase replacement failed and regular-file rollback "
+                            f"also failed: {rollback_error}"
+                        ) from error
+                    raise
+            changed_paths = tuple(mutation.path for mutation in plan.mutations)
+            if plan.apply_testcases and plan.testcase_dir is not None:
+                changed_paths += (plan.testcase_dir,)
+            results.append(
+                PullProblemResult(
+                    plan.remote.problem.problem_id,
+                    plan.remote.problem.path,
+                    changed_paths,
+                    plan.warnings,
+                    plan.testcase_changes,
+                    plan.apply_testcases,
+                )
+            )
+        return PullResult(tuple(results))
 
 
 def _unified(
@@ -628,6 +650,8 @@ def _text_entries(
 
 
 def _source_text(path: Path) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise FileOperationError(f"source is not a regular file: {path}")
     return read_text(path)
 
 
@@ -671,7 +695,9 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
     generator = remote.generator
     if generator is None or not generator.source.strip():
         if testset.generator is not None:
-            entries.append(DiffEntry("generator", "registered locally but empty remotely"))
+            local_source = _source_text(testset_path / testset.generator.src)
+            if local_source.strip():
+                entries.append(DiffEntry("generator", "registered locally but empty remotely"))
         warnings.append(f"problem {problem.problem_id}: remote generator is unavailable or empty")
     elif testset.generator is None:
         entries.append(DiffEntry("generator", "present remotely but missing locally"))
@@ -688,8 +714,7 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
             entries.append(
                 DiffEntry(
                     "generator.test_case_num",
-                    f"remote={generator.test_case_num!r} "
-                    f"local={local_generator.test_case_num!r}",
+                    f"remote={generator.test_case_num!r} local={local_generator.test_case_num!r}",
                 )
             )
         unified = _unified(
@@ -705,7 +730,9 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
         warnings.append(f"problem {problem.problem_id}: remote judge API is unavailable")
     elif not judge.source.strip():
         if testset.judge is not None:
-            entries.append(DiffEntry("judge", "registered locally but empty remotely"))
+            local_source = _source_text(testset_path / testset.judge.src)
+            if local_source.strip():
+                entries.append(DiffEntry("judge", "registered locally but empty remotely"))
         warnings.append(f"problem {problem.problem_id}: remote judge is empty")
     elif testset.judge is None:
         entries.append(DiffEntry("judge", "present remotely but missing locally"))
@@ -728,8 +755,10 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
 
     if remote.testcases is not None:
         directory = _testcase_directory(problem, project_config)
-        local_cases = read_testcases(directory, require_nonempty=False)
-        changes = compare_snapshots(local_cases, remote.testcases)
+        local_cases, missing_outputs, missing_inputs = inspect_testcases(directory)
+        changes = compare_snapshots(
+            local_cases, remote.testcases, incomplete=missing_outputs + missing_inputs
+        )
         for name in changes.added:
             entries.append(DiffEntry(f"testcase {name}", "exists only remotely"))
         for name in changes.removed:
@@ -753,13 +782,17 @@ def diff_remote(
 ) -> DiffResult:
     """Return remote-to-local differences without modifying any local path."""
 
-    remote_problems = _fetch_remote(
-        target, client_factory, include_testcases=include_testcases
-    )
-    project_config = _project_config(target)
-    return DiffResult(
-        tuple(_diff_problem(remote, project_config) for remote in remote_problems)
-    )
+    with ExitStack() as testcase_staging:
+        remote_problems = _fetch_remote(
+            target,
+            client_factory,
+            include_testcases=include_testcases,
+            testcase_staging=testcase_staging,
+        )
+        project_config = _project_config(target)
+        return DiffResult(
+            tuple(_diff_problem(remote, project_config) for remote in remote_problems)
+        )
 
 
 diff = diff_remote

@@ -134,6 +134,20 @@ def test_init_creates_idempotent_project_without_git_or_api(tmp_path: Path) -> N
     }
 
 
+def test_init_uses_plain_text_markers_for_gitignore(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    original = "continued-pattern\\\n"
+    (root / ".gitignore").write_text(original, encoding="utf-8")
+
+    init_project(root)
+    init_project(root)
+
+    updated = (root / ".gitignore").read_text(encoding="utf-8")
+    assert updated.startswith(original)
+    assert updated.count("# BEGIN YUKITOOLS-RIME") == 1
+
+
 def test_init_preserves_existing_content_values_and_env_example(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
@@ -270,9 +284,7 @@ def test_mismatched_remote_id_leaves_no_problem(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("name", ["", "../escape", "nested/problem", "/absolute"])
-def test_new_problem_rejects_non_child_directory_names(
-    tmp_path: Path, name: str
-) -> None:
+def test_new_problem_rejects_non_child_directory_names(tmp_path: Path, name: str) -> None:
     root = tmp_path / "project"
     init_project(root)
     called = False
@@ -313,9 +325,8 @@ def test_init_preserves_project_bom_crlf_and_custom_output_ignore(
         base_url="https://mirror.example/api",
         rime_out_dir="generated",
     )
-    source = (
-        "\ufeffuse_plugin('rime_plus')\r\n\r\n"
-        + render_project_block(custom).replace("\n", "\r\n")
+    source = "\ufeffuse_plugin('rime_plus')\r\n\r\n" + render_project_block(custom).replace(
+        "\n", "\r\n"
     )
     (root / "PROJECT").write_bytes(source.encode("utf-8"))
 

@@ -75,9 +75,7 @@ def test_snapshot_replaces_all_files(tmp_path: Path) -> None:
     target.mkdir()
     (target / "old.in").write_bytes(b"old")
     replace_directory_snapshot(target, {"new.in": b"1", "new.diff": b"2"})
-    assert {p.name: p.read_bytes() for p in target.iterdir()} == {
-        "new.in": b"1", "new.diff": b"2"
-    }
+    assert {p.name: p.read_bytes() for p in target.iterdir()} == {"new.in": b"1", "new.diff": b"2"}
     with pytest.raises(ValidationError):
         replace_directory_snapshot(target, {"../escape": b"x"})
     assert (target / "new.in").read_bytes() == b"1"

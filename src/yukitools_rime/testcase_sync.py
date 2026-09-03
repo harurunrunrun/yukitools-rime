@@ -5,21 +5,48 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from yukitools_rime.errors import ConflictError, FileOperationError, ValidationError
-from yukitools_rime.files import atomic_write_bytes, display_path
-from yukitools_rime.layout import TestCaseData, local_testcase_paths, read_testcases
+from yukitools_rime.files import atomic_write_bytes, discard_tree, display_path, read_bytes
+from yukitools_rime.layout import (
+    TestCaseData,
+    inspect_testcases,
+    local_testcase_paths,
+    read_testcases,
+)
 from yukitools_rime.models import Which, validate_testcase_name
 
 MAX_UPLOAD_FILES = 100
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MULTIPART_FILE_OVERHEAD = 512
 
-TestcaseSnapshot = dict[str, TestCaseData]
+TestcaseSnapshot = Mapping[str, TestCaseData]
+
+
+class _StagedTestcaseSnapshot(Mapping[str, TestCaseData]):
+    """A testcase snapshot whose byte bodies remain on disk until accessed."""
+
+    def __init__(self, root: Path, names: Iterable[str]) -> None:
+        self._root = root
+        self._names = tuple(sorted(names))
+        self._name_set = frozenset(self._names)
+
+    def __getitem__(self, name: str) -> TestCaseData:
+        if name not in self._name_set:
+            raise KeyError(name)
+        input_path, output_path = local_testcase_paths(self._root, name)
+        return TestCaseData(name, read_bytes(input_path), read_bytes(output_path))
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._names)
+
+    def __len__(self) -> int:
+        return len(self._names)
 
 
 class TestcaseAPI(Protocol):
@@ -92,12 +119,14 @@ def _remote_names(names: list[str], *, side: Which) -> tuple[str, ...]:
     )
     if len(validated) != len(set(validated)):
         raise ValidationError(f"remote {side.value} testcase list contains duplicate names")
+    if len(validated) != len({name.casefold() for name in validated}):
+        raise ValidationError(
+            f"remote {side.value} testcase list contains case-insensitive duplicates"
+        )
     return tuple(sorted(validated))
 
 
-def fetch_remote_snapshot(client: TestcaseAPI, problem_id: int) -> TestcaseSnapshot:
-    """List both sides, require an exact name match, then fetch byte-exact bodies."""
-
+def _paired_remote_names(client: TestcaseAPI, problem_id: int) -> tuple[str, ...]:
     inputs = _remote_names(client.list_testcases(problem_id, Which.IN), side=Which.IN)
     outputs = _remote_names(client.list_testcases(problem_id, Which.OUT), side=Which.OUT)
     input_set = set(inputs)
@@ -111,30 +140,95 @@ def fetch_remote_snapshot(client: TestcaseAPI, problem_id: int) -> TestcaseSnaps
         if missing_inputs:
             details.append("missing remote inputs for " + ", ".join(missing_inputs))
         raise ValidationError("remote testcase names differ: " + "; ".join(details))
-    snapshot: TestcaseSnapshot = {}
-    for name in inputs:
-        input_data = client.get_testcase(problem_id, Which.IN, name)
-        output_data = client.get_testcase(problem_id, Which.OUT, name)
-        if not isinstance(input_data, bytes) or not isinstance(output_data, bytes):
-            raise ValidationError(f"remote testcase {name!r} did not return raw bytes")
-        snapshot[name] = TestCaseData(name, input_data, output_data)
-    return snapshot
+    return inputs
+
+
+def _fetch_remote_case(
+    client: TestcaseAPI,
+    problem_id: int,
+    name: str,
+) -> TestCaseData:
+    input_data = client.get_testcase(problem_id, Which.IN, name)
+    output_data = client.get_testcase(problem_id, Which.OUT, name)
+    if not isinstance(input_data, bytes) or not isinstance(output_data, bytes):
+        raise ValidationError(f"remote testcase {name!r} did not return raw bytes")
+    return TestCaseData(name, input_data, output_data)
+
+
+def fetch_remote_snapshot(client: TestcaseAPI, problem_id: int) -> TestcaseSnapshot:
+    """Fetch a byte-exact remote snapshot into memory."""
+
+    return {
+        name: _fetch_remote_case(client, problem_id, name)
+        for name in _paired_remote_names(client, problem_id)
+    }
+
+
+def fetch_remote_snapshot_to(
+    client: TestcaseAPI,
+    problem_id: int,
+    directory: str | Path,
+) -> TestcaseSnapshot:
+    """Fetch a snapshot to an empty staging directory and return a lazy mapping."""
+
+    root = Path(directory)
+    try:
+        if root.is_symlink():
+            raise FileOperationError(f"invalid testcase staging directory: {display_path(root)}")
+        root.mkdir(parents=True, exist_ok=True)
+        if not root.is_dir():
+            raise FileOperationError(f"invalid testcase staging directory: {display_path(root)}")
+        if any(root.iterdir()):
+            raise FileOperationError(
+                f"testcase staging directory is not empty: {display_path(root)}"
+            )
+    except FileOperationError:
+        raise
+    except OSError as exc:
+        raise FileOperationError(
+            f"could not prepare testcase staging directory {display_path(root)}: {exc}"
+        ) from exc
+
+    names = _paired_remote_names(client, problem_id)
+    written: list[Path] = []
+    try:
+        for name in names:
+            case = _fetch_remote_case(client, problem_id, name)
+            input_path, output_path = local_testcase_paths(root, name)
+            atomic_write_bytes(input_path, case.input, create_parents=False)
+            written.append(input_path)
+            atomic_write_bytes(output_path, case.output, create_parents=False)
+            written.append(output_path)
+    except BaseException:
+        for path in reversed(written):
+            with suppress(OSError):
+                path.unlink(missing_ok=True)
+        raise
+    return _StagedTestcaseSnapshot(root, names)
 
 
 def compare_snapshots(
     local: Mapping[str, TestCaseData],
     remote: Mapping[str, TestCaseData],
+    *,
+    incomplete: Iterable[str] = (),
 ) -> SnapshotChanges:
     """Compare snapshots in the pull direction (remote overwrites local)."""
 
     local_names = set(local)
     remote_names = set(remote)
+    incomplete_names = {
+        validate_testcase_name(name, label="incomplete local testcase name") for name in incomplete
+    }
     return SnapshotChanges(
-        added=tuple(sorted(remote_names - local_names)),
+        added=tuple(sorted(remote_names - local_names - incomplete_names)),
         changed=tuple(
-            sorted(name for name in remote_names & local_names if remote[name] != local[name])
+            sorted(
+                {name for name in remote_names & local_names if remote[name] != local[name]}
+                | (remote_names & incomplete_names)
+            )
         ),
-        removed=tuple(sorted(local_names - remote_names)),
+        removed=tuple(sorted((local_names | incomplete_names) - remote_names)),
     )
 
 
@@ -142,18 +236,24 @@ def _is_case_path(path: Path) -> bool:
     return path.name.endswith(".in") or path.name.endswith(".diff")
 
 
-def _validated_snapshot(snapshot: Mapping[str, TestCaseData]) -> TestcaseSnapshot:
-    validated: TestcaseSnapshot = {}
+def _validated_snapshot_names(snapshot: Mapping[str, TestCaseData]) -> tuple[str, ...]:
+    validated: list[str] = []
+    spellings: dict[str, str] = {}
     for name, case in snapshot.items():
         validate_testcase_name(name)
+        previous = spellings.setdefault(name.casefold(), name)
+        if previous != name:
+            raise ValidationError(
+                f"case-insensitive testcase name collision: {previous!r} and {name!r}"
+            )
         if not isinstance(case, TestCaseData):
             raise ValidationError(f"snapshot entry {name!r} is not TestCaseData")
         if case.name != name:
             raise ValidationError(
                 f"snapshot key {name!r} does not match testcase name {case.name!r}"
             )
-        validated[name] = case
-    return validated
+        validated.append(name)
+    return tuple(sorted(validated))
 
 
 def replace_local_snapshot(
@@ -164,7 +264,7 @@ def replace_local_snapshot(
 
     target = Path(directory)
     parent = target.parent
-    cases = _validated_snapshot(snapshot)
+    case_names = _validated_snapshot_names(snapshot)
     try:
         parent.mkdir(parents=True, exist_ok=True)
         if parent.is_symlink() or not parent.is_dir():
@@ -179,8 +279,6 @@ def replace_local_snapshot(
     stage = Path(tempfile.mkdtemp(dir=parent, prefix=f".{target.name}.stage-"))
     backup = Path(tempfile.mkdtemp(dir=parent, prefix=f".{target.name}.backup-"))
     backup.rmdir()
-    moved_old = False
-    installed_new = False
     try:
         if target.exists():
             stage.rmdir()
@@ -192,41 +290,40 @@ def replace_local_snapshot(
                 # Directories are artifacts even when their name has a case suffix.
                 continue
             entry.unlink()
-        for name, case in cases.items():
+        for name in case_names:
+            case = snapshot[name]
             input_path, output_path = local_testcase_paths(stage, name)
             atomic_write_bytes(input_path, case.input, create_parents=False)
             atomic_write_bytes(output_path, case.output, create_parents=False)
         if target.exists():
             os.replace(target, backup)
-            moved_old = True
         os.replace(stage, target)
-        installed_new = True
-        if moved_old:
-            shutil.rmtree(backup)
-            moved_old = False
-    except (OSError, FileOperationError) as exc:
+        if backup.exists():
+            discard_tree(backup)
+    except BaseException as exc:
+        # The stage disappears only when the final atomic replace commits.
+        if not stage.exists() and target.exists():
+            if backup.exists():
+                discard_tree(backup)
+            return
         rollback_error: OSError | None = None
-        if installed_new:
-            try:
-                shutil.rmtree(target)
-                installed_new = False
-            except OSError as rollback_exc:
-                rollback_error = rollback_exc
-        if moved_old and not target.exists():
+        if not target.exists() and backup.exists():
             try:
                 os.replace(backup, target)
-                moved_old = False
             except OSError as rollback_exc:
-                rollback_error = rollback_error or rollback_exc
+                rollback_error = rollback_exc
+        if not isinstance(exc, Exception) and rollback_error is None:
+            raise
         detail = f"; rollback also failed: {rollback_error}" if rollback_error else ""
         raise FileOperationError(
             f"could not replace testcase snapshot {display_path(target)}: {exc}{detail}"
         ) from exc
     finally:
+        committed = not stage.exists() and target.exists()
         if stage.exists():
-            shutil.rmtree(stage, ignore_errors=True)
-        if backup.exists() and not moved_old:
-            shutil.rmtree(backup, ignore_errors=True)
+            discard_tree(stage)
+        if backup.exists() and committed:
+            discard_tree(backup)
 
 
 def pull_testcases(
@@ -240,9 +337,13 @@ def pull_testcases(
 
     target = Path(directory)
     existed = target.is_dir() and not target.is_symlink()
-    local = read_testcases(target, require_nonempty=False) if existed else {}
+    local: TestcaseSnapshot = {}
+    incomplete: tuple[str, ...] = ()
+    if existed:
+        local, missing_outputs, missing_inputs = inspect_testcases(target)
+        incomplete = missing_outputs + missing_inputs
     remote = fetch_remote_snapshot(client, problem_id)
-    changes = compare_snapshots(local, remote)
+    changes = compare_snapshots(local, remote, incomplete=incomplete)
     if not changes.has_changes:
         return PullResult(remote, changes, applied=False)
     if existed:
@@ -281,10 +382,6 @@ def batch_upload_files(
     for name in sorted(files):
         content = files[name]
         size = estimate_upload_size(name, content)
-        if size > max_bytes:
-            raise ValidationError(
-                f"testcase {name!r} exceeds the estimated upload limit ({max_bytes} bytes)"
-            )
         if current and (len(current) >= max_files or current_size + size > max_bytes):
             batches.append(current)
             current = {}
@@ -329,16 +426,25 @@ def push_testcases(
         client.delete_testcase(problem_id, Which.OUT, name)
 
     normalized = fetch_remote_snapshot(client, problem_id)
-    missing = set(local) - set(normalized)
+    uploaded_input_names = set(input_uploads)
+    uploaded_output_names = set(output_uploads)
+    uploaded_names = uploaded_input_names | uploaded_output_names
+    missing = uploaded_names - set(normalized)
     if missing:
         raise ValidationError(
-            "server normalization response omitted local testcases: "
+            "server normalization response omitted uploaded testcases: "
             + ", ".join(sorted(missing))
         )
-    replace_local_snapshot(
-        target,
-        {name: normalized[name] for name in local},
-    )
+    refreshed = dict(local)
+    for name in uploaded_names:
+        local_case = local[name]
+        normalized_case = normalized[name]
+        refreshed[name] = TestCaseData(
+            name,
+            normalized_case.input if name in uploaded_input_names else local_case.input,
+            (normalized_case.output if name in uploaded_output_names else local_case.output),
+        )
+    replace_local_snapshot(target, refreshed)
     return PushResult(
         normalized,
         uploaded_inputs=len(input_uploads),
@@ -361,6 +467,7 @@ __all__ = [
     "compare_snapshots",
     "estimate_upload_size",
     "fetch_remote_snapshot",
+    "fetch_remote_snapshot_to",
     "pull_testcases",
     "push_testcases",
     "replace_local_snapshot",

@@ -23,6 +23,7 @@ from yukitools_rime.commands import push as push_module
 from yukitools_rime.commands.push import (
     JudgeCompileError,
     PushExecutionError,
+    PushInterrupted,
     push,
 )
 from yukitools_rime.errors import LayoutError, UsageError, ValidationError
@@ -76,9 +77,7 @@ def make_project(
         problem = root / chr(ord("a") + problem_id - 1)
         problem.mkdir()
         (problem / "PROBLEM").write_text(
-            render_problem_block(
-                ProblemConfig(problem_id, settings(), problem.name.upper())
-            ),
+            render_problem_block(ProblemConfig(problem_id, settings(), problem.name.upper())),
             encoding="utf-8",
         )
         (problem / "statement.md").write_text("local statement\n", encoding="utf-8")
@@ -134,9 +133,7 @@ class FakeClient:
                 settings(),
             )
         if self.generator is None:
-            self.generator = GeneratorContent(
-                "cpp17", "local generator\n", True, 2
-            )
+            self.generator = GeneratorContent("cpp17", "local generator\n", True, 2)
         if self.judge is None:
             self.judge = JudgeCodeContent("cpp17", "local judge\n", "AC")
 
@@ -150,9 +147,7 @@ class FakeClient:
         assert self.edit is not None
         return self.edit
 
-    def save_problem_edit(
-        self, problem_id: int, request: ProblemEditRequest
-    ) -> SaveResponse:
+    def save_problem_edit(self, problem_id: int, request: ProblemEditRequest) -> SaveResponse:
         self.record("save-problem")
         self.problem_requests.append(request)
         self.edit = ProblemEditContent(
@@ -168,9 +163,7 @@ class FakeClient:
         self.record("get-generator")
         return self.generator
 
-    def save_generator(
-        self, problem_id: int, request: GeneratorRequest
-    ) -> SaveResponse:
+    def save_generator(self, problem_id: int, request: GeneratorRequest) -> SaveResponse:
         self.record("save-generator")
         self.generator_requests.append(request)
         self.generator = GeneratorContent(
@@ -184,19 +177,13 @@ class FakeClient:
     def get_judge_code(self, problem_id: int) -> JudgeCodeContent | None:
         self.record("get-judge")
         if self.judge_saved:
-            status = (
-                self.poll_statuses.pop(0)
-                if self.poll_statuses
-                else self.save_judge_status
-            )
+            status = self.poll_statuses.pop(0) if self.poll_statuses else self.save_judge_status
             assert self.judge_requests
             request = self.judge_requests[-1]
             self.judge = JudgeCodeContent(request.lang_id, request.source, status)
         return self.judge
 
-    def save_judge_code(
-        self, problem_id: int, request: JudgeCodeRequest
-    ) -> JudgeCodeSaveResponse:
+    def save_judge_code(self, problem_id: int, request: JudgeCodeRequest) -> JudgeCodeSaveResponse:
         self.record("save-judge")
         self.judge_requests.append(request)
         self.judge_saved = True
@@ -211,9 +198,7 @@ class FakeClient:
         self.record("get-editorial")
         return self.editorial
 
-    def save_editorial(
-        self, problem_id: int, request: EditorialRequest
-    ) -> SaveResponse:
+    def save_editorial(self, problem_id: int, request: EditorialRequest) -> SaveResponse:
         self.record("save-editorial")
         self.editorial_requests.append(request)
         self.editorial = EditorialContent(
@@ -243,11 +228,7 @@ class FakeClient:
         for name, content in files.items():
             normalized = content + b"|server" if self.normalize_uploads else content
             self.cases[(value, name)] = normalized
-        reported = (
-            tuple(files)
-            if self.reported_file_names is None
-            else self.reported_file_names
-        )
+        reported = tuple(files) if self.reported_file_names is None else self.reported_file_names
         return UploadResponse(reported, self.upload_warning)
 
     def delete_testcase(self, problem_id: int, which: Which | str, name: str) -> None:
@@ -262,9 +243,7 @@ def factory(clients: Mapping[int, FakeClient]) -> push_module.ClientFactory:
 
 def snapshot(root: Path) -> dict[str, bytes]:
     return {
-        str(path.relative_to(root)): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
+        str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()
     }
 
 
@@ -343,9 +322,7 @@ def test_dry_run_reports_plan_without_remote_or_local_writes(tmp_path: Path) -> 
     assert result.dry_run
     assert result.changed
     assert result.completed_items == ()
-    assert not any(
-        call.startswith(("save-", "upload-", "delete-")) for call in client.calls
-    )
+    assert not any(call.startswith(("save-", "upload-", "delete-")) for call in client.calls)
     assert snapshot(tmp_path) == before
 
 
@@ -403,7 +380,7 @@ def test_testcase_output_symlink_escape_stops_before_api(tmp_path: Path) -> None
         called = True
         return FakeClient()
 
-    with pytest.raises(LayoutError, match="escapes problem root"):
+    with pytest.raises(LayoutError, match=r"symlink|escapes problem root"):
         push(project, make_client, include_testcases=True)
 
     assert not called
@@ -496,12 +473,10 @@ def test_upload_response_warnings_and_changed_filenames_are_reported(
         testcase_refresh_delay=0,
     )
 
-    assert sum(
-        "server normalized the upload" in warning for warning in result.warnings
-    ) == 2
-    assert sum(
-        "server reported different file names" in warning for warning in result.warnings
-    ) == 2
+    assert sum("server normalized the upload" in warning for warning in result.warnings) == 2
+    assert (
+        sum("server reported different file names" in warning for warning in result.warnings) == 2
+    )
 
 
 def test_empty_program_sources_explicitly_delete_remote_programs(tmp_path: Path) -> None:
@@ -533,9 +508,7 @@ class FakeClock:
 
 def changed_judge_project(tmp_path: Path) -> ProjectLayout:
     project = make_project(tmp_path)
-    (project.problems[0].path / "tests" / "judge.cpp").write_text(
-        "new judge\n", encoding="utf-8"
-    )
+    (project.problems[0].path / "tests" / "judge.cpp").write_text("new judge\n", encoding="utf-8")
     return project
 
 
@@ -598,6 +571,35 @@ def test_judge_timeout_is_warning(tmp_path: Path) -> None:
     assert clock.sleeps == [3, 2]
 
 
+def test_judge_wait_retries_transient_missing_status(tmp_path: Path) -> None:
+    project = changed_judge_project(tmp_path)
+    clock = FakeClock()
+    client = FakeClient(save_judge_status="WJ", poll_statuses=["AC"])
+    original_get = client.get_judge_code
+    polls = 0
+
+    def transient(problem_id: int) -> JudgeCodeContent | None:
+        nonlocal polls
+        if client.judge_saved:
+            polls += 1
+            if polls == 1:
+                client.record("get-judge")
+                return None
+        return original_get(problem_id)
+
+    client.get_judge_code = transient  # type: ignore[method-assign]
+    result = push(
+        project,
+        factory({1: client}),
+        judge_timeout=10,
+        judge_poll_interval=3,
+        sleep=clock.sleep,
+        monotonic=clock.now,
+    )
+    assert result.warnings == ()
+    assert clock.sleeps == [3, 3]
+
+
 def test_no_wait_skips_judge_polling(tmp_path: Path) -> None:
     project = changed_judge_project(tmp_path)
     client = FakeClient(save_judge_status="WJ")
@@ -615,12 +617,8 @@ def test_failure_reports_completed_items_in_write_order(tmp_path: Path) -> None:
         render_problem_block(ProblemConfig(1, settings("changed"), "A")),
         encoding="utf-8",
     )
-    (problem.path / "tests" / "generator.cpp").write_text(
-        "changed generator\n", encoding="utf-8"
-    )
-    (problem.path / "tests" / "judge.cpp").write_text(
-        "changed judge\n", encoding="utf-8"
-    )
+    (problem.path / "tests" / "generator.cpp").write_text("changed generator\n", encoding="utf-8")
+    (problem.path / "tests" / "judge.cpp").write_text("changed judge\n", encoding="utf-8")
     client = FakeClient(fail_on="save-judge")
 
     with pytest.raises(PushExecutionError) as caught:
@@ -632,6 +630,28 @@ def test_failure_reports_completed_items_in_write_order(tmp_path: Path) -> None:
         "problem 1 generator",
     )
     assert client.calls[-3:] == ["save-problem", "save-generator", "save-judge"]
+
+
+def test_interrupt_reports_completed_remote_items(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    problem = project.problems[0]
+    (problem.path / "PROBLEM").write_text(
+        render_problem_block(ProblemConfig(1, settings("changed"), "A")),
+        encoding="utf-8",
+    )
+    (problem.path / "tests" / "generator.cpp").write_text("changed generator\n", encoding="utf-8")
+    client = FakeClient()
+
+    def interrupt(_problem_id: int, _request: GeneratorRequest) -> SaveResponse:
+        raise KeyboardInterrupt
+
+    client.save_generator = interrupt  # type: ignore[method-assign]
+    with pytest.raises(PushInterrupted) as caught:
+        push(project, factory({1: client}))
+
+    assert caught.value.failed_item == "problem 1 generator"
+    assert caught.value.completed_items == ("problem 1 settings/statement",)
+    assert "remote application state is unknown" in str(caught.value)
 
 
 def test_generate_forces_only_generator_write(tmp_path: Path) -> None:

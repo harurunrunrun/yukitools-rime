@@ -14,6 +14,7 @@ from yukitools_rime.testcase_sync import (
     batch_upload_files,
     compare_snapshots,
     fetch_remote_snapshot,
+    fetch_remote_snapshot_to,
     pull_testcases,
     push_testcases,
     replace_local_snapshot,
@@ -78,14 +79,19 @@ def write_case(directory: Path, value: CaseData) -> None:
     (directory / f"{value.name}.diff").write_bytes(value.output)
 
 
+def test_case_data_requires_raw_bytes() -> None:
+    with pytest.raises(ValidationError, match="input must be bytes"):
+        CaseData("sample", "text", b"output")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="output must be bytes"):
+        CaseData("sample", b"input", "text")  # type: ignore[arg-type]
+
+
 def test_fetch_requires_exact_unique_names_and_reads_raw_bytes() -> None:
     api = FakeAPI({"b.txt": b"bi", "a.txt": b"ai"}, {"a.txt": b"ao", "b.txt": b"bo"})
     snapshot = fetch_remote_snapshot(api, 42)
     assert list(snapshot) == ["a.txt", "b.txt"]
     assert snapshot["a.txt"] == case("a.txt", b"ai", b"ao")
-    assert api.gets == [
-        ("in", "a.txt"), ("out", "a.txt"), ("in", "b.txt"), ("out", "b.txt")
-    ]
+    assert api.gets == [("in", "a.txt"), ("out", "a.txt"), ("in", "b.txt"), ("out", "b.txt")]
     with pytest.raises(ValidationError, match="names differ"):
         fetch_remote_snapshot(FakeAPI({"a": b"x"}, {"b": b"x"}), 42)
     duplicate = FakeAPI({"a": b"x"}, {"a": b"y"})
@@ -94,11 +100,66 @@ def test_fetch_requires_exact_unique_names_and_reads_raw_bytes() -> None:
         fetch_remote_snapshot(duplicate, 42)
 
 
-def test_fetch_rejects_unsafe_or_empty_cases() -> None:
+def test_fetch_rejects_unsafe_names_but_preserves_empty_remote_bytes() -> None:
     with pytest.raises(ValidationError):
         fetch_remote_snapshot(FakeAPI({"bad name": b"x"}, {"bad name": b"y"}), 42)
-    with pytest.raises(ValidationError, match="empty input"):
-        fetch_remote_snapshot(FakeAPI({"a": b""}, {"a": b"y"}), 42)
+    snapshot = fetch_remote_snapshot(FakeAPI({"a": b""}, {"a": b"y"}), 42)
+    assert snapshot["a"] == case("a", b"", b"y")
+
+
+def test_fetch_to_stages_exact_bytes_and_reads_values_lazily(tmp_path: Path) -> None:
+    raw_input = b"input\x00\xff\r\n"
+    raw_output = b"output\xfe\x00\n"
+    api = FakeAPI(
+        {"sample.01": raw_input},
+        {"sample.01": raw_output},
+    )
+    stage = tmp_path / "stage"
+    stage.mkdir()
+
+    snapshot = fetch_remote_snapshot_to(api, 42, stage)
+
+    staged_files = tuple(path for path in stage.rglob("*") if path.is_file())
+    staged_contents = {path.read_bytes(): path for path in staged_files}
+    assert raw_input in staged_contents
+    assert raw_output in staged_contents
+    assert tuple(snapshot) == ("sample.01",)
+    assert api.gets == [("in", "sample.01"), ("out", "sample.01")]
+
+    changed_input = b"changed only on disk\x00"
+    staged_contents[raw_input].write_bytes(changed_input)
+    assert snapshot["sample.01"] == case("sample.01", changed_input, raw_output)
+
+
+@pytest.mark.parametrize(
+    ("input_names", "output_names", "message"),
+    [
+        (("../escape",), ("../escape",), "remote"),
+        (("same", "same"), ("same", "same"), "duplicate"),
+        (("Case", "case"), ("Case", "case"), "case-insensitive"),
+        (("input_only",), ("output_only",), "names differ"),
+    ],
+)
+def test_fetch_to_validates_all_remote_names_before_downloading_bodies(
+    tmp_path: Path,
+    input_names: tuple[str, ...],
+    output_names: tuple[str, ...],
+    message: str,
+) -> None:
+    api = FakeAPI()
+
+    def list_names(_problem_id: int, which: Which | str) -> list[str]:
+        return list(input_names if FakeAPI.side(which) == "in" else output_names)
+
+    api.list_testcases = list_names  # type: ignore[method-assign]
+    stage = tmp_path / "stage"
+    stage.mkdir()
+
+    with pytest.raises(ValidationError, match=message):
+        fetch_remote_snapshot_to(api, 42, stage)
+
+    assert api.gets == []
+    assert not tuple(stage.iterdir())
 
 
 def test_compare_reports_remote_direction_names_and_counts() -> None:
@@ -172,16 +233,17 @@ def test_batching_honors_count_size_and_oversize() -> None:
     assert [len(batch) for batch in batch_upload_files(files)] == [100, 100, 1]
     size = MULTIPART_FILE_OVERHEAD + len("a") + 1
     assert len(batch_upload_files({"a": b"x", "b": b"x"}, max_bytes=size)) == 2
-    with pytest.raises(ValidationError, match="exceeds"):
-        batch_upload_files({"a": b"xx"}, max_bytes=size)
+    assert batch_upload_files({"a": b"xx"}, max_bytes=size) == ({"a": b"xx"},)
 
 
-@pytest.mark.parametrize("kind", ["missing", "incomplete"])
+@pytest.mark.parametrize("kind", ["missing", "incomplete", "nonregular"])
 def test_push_rejects_invalid_local_before_api(tmp_path: Path, kind: str) -> None:
     target = tmp_path / "cases"
     if kind == "incomplete":
         target.mkdir()
         (target / "sample.in").write_bytes(b"x")
+    elif kind == "nonregular":
+        (target / "sample.in").mkdir(parents=True)
     api = FakeAPI()
     with pytest.raises(Exception, match=r"testcase|\.diff"):
         push_testcases(api, 42, target)

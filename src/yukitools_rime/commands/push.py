@@ -22,7 +22,7 @@ from yukitools_rime.api.types import (
     ProblemEditRequest,
     UploadResponse,
 )
-from yukitools_rime.errors import APIError, LayoutError, UsageError, ValidationError
+from yukitools_rime.errors import APIError, AppError, LayoutError, UsageError, ValidationError
 from yukitools_rime.files import normalize_text, read_text, require_regular_file
 from yukitools_rime.layout import (
     ProblemLayout,
@@ -94,11 +94,27 @@ class PushExecutionError(APIError):
     ) -> None:
         completed = ", ".join(completed_items) if completed_items else "(none)"
         super().__init__(
-            f"{failed_item} failed; completed items: {completed}; cause: {cause}"
+            f"{failed_item} failed; remote application state is unknown; "
+            f"completed items: {completed}; cause: {cause}"
         )
         self.failed_item = failed_item
         self.completed_items = completed_items
         self.cause = cause
+
+
+class PushInterrupted(AppError):
+    """A push was interrupted after remote writes may have started."""
+
+    exit_code = 130
+
+    def __init__(self, failed_item: str, completed_items: tuple[str, ...]) -> None:
+        completed = ", ".join(completed_items) if completed_items else "(none)"
+        super().__init__(
+            f"{failed_item} interrupted; remote application state is unknown; "
+            f"completed items: {completed}"
+        )
+        self.failed_item = failed_item
+        self.completed_items = completed_items
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,17 +290,14 @@ def _preflight_local(
         judge = _local_program(current.testset.path, testset.judge)
     if generate and generator is None:
         raise ValidationError(
-            f"{current.path}: --generate requires a local "
-            "yukicoder_generator declaration"
+            f"{current.path}: --generate requires a local yukicoder_generator declaration"
         )
     editorial = _document(current, "editorial", required=False)
     testcase_dir: Path | None = None
     testcases: Mapping[str, TestCaseData] | None = None
     if include_testcases:
         if current.testset is None:
-            raise LayoutError(
-                f"{current.path}: --testcases requires a direct-child TESTSET"
-            )
+            raise LayoutError(f"{current.path}: --testcases requires a direct-child TESTSET")
         testcase_dir = current.testcase_dir(project_config)
         # This rejects a missing/empty directory and incomplete .in/.diff pairs
         # before any client is created or any remote write is possible.
@@ -302,10 +315,7 @@ def _preflight_local(
 
 
 def _same_document(remote_text: str, remote_markdown: bool, local: Statement) -> bool:
-    return (
-        remote_markdown == local.is_markdown
-        and normalize_text(remote_text) == local.text
-    )
+    return remote_markdown == local.is_markdown and normalize_text(remote_text) == local.text
 
 
 def _testcase_plan(
@@ -363,14 +373,10 @@ def _build_remote_plan(
         generator_config = local.generator.config
         assert isinstance(generator_config, GeneratorConfig)
         remote_generator = client.get_generator(problem_id)
-        if remote_generator is not None and not isinstance(
-            remote_generator, GeneratorContent
-        ):
+        if remote_generator is not None and not isinstance(remote_generator, GeneratorContent):
             raise ValidationError("generator API returned an unexpected response type")
         deleting = local.generator.deleting
-        remote_has_source = (
-            remote_generator is not None and bool(remote_generator.source.strip())
-        )
+        remote_has_source = remote_generator is not None and bool(remote_generator.source.strip())
         changed = (
             remote_has_source
             if deleting
@@ -464,9 +470,7 @@ def _validate_options(
         ("judge_poll_interval", judge_poll_interval, False),
         ("testcase_refresh_delay", testcase_refresh_delay, True),
     ):
-        if isinstance(numeric_value, bool) or not isinstance(
-            numeric_value, (int, float)
-        ):
+        if isinstance(numeric_value, bool) or not isinstance(numeric_value, (int, float)):
             raise ValidationError(f"{name} must be a number")
         if (
             not math.isfinite(numeric_value)
@@ -489,6 +493,8 @@ def _perform(
         result = operation()
     except Exception as exc:
         raise PushExecutionError(label, tuple(completed), exc) from exc
+    except KeyboardInterrupt as exc:
+        raise PushInterrupted(label, tuple(completed)) from exc
     completed.append(label)
     return result
 
@@ -509,9 +515,7 @@ def _wait_for_judge(
         if status == "AC":
             return None
         if status == "CE":
-            raise JudgeCompileError(
-                f"problem {problem_id} judge compilation failed with CE"
-            )
+            raise JudgeCompileError(f"problem {problem_id} judge compilation failed with CE")
         return status
 
     pending = outcome(initial_status)
@@ -534,7 +538,7 @@ def _wait_for_judge(
         sleep(min(interval, remaining))
         code = plan.client.get_judge_code(problem_id)
         if code is None:
-            return f"problem {problem_id}: judge compilation status API is unavailable"
+            continue
         status = code.status
         pending = outcome(status)
         if pending is None:
@@ -588,6 +592,11 @@ def _execute_plan(
                     sleep=sleep,
                     monotonic=monotonic,
                 )
+            except KeyboardInterrupt as exc:
+                raise PushInterrupted(
+                    f"{prefix} judge compilation",
+                    tuple(completed),
+                ) from exc
             except Exception as exc:
                 raise PushExecutionError(
                     f"{prefix} judge compilation",
@@ -655,17 +664,26 @@ def _execute_plan(
         def refresh() -> None:
             if testcase_refresh_delay:
                 sleep(testcase_refresh_delay)
+            uploaded_input_names = {name for batch in testcases.input_batches for name in batch}
+            uploaded_output_names = {name for batch in testcases.output_batches for name in batch}
+            uploaded_names = uploaded_input_names | uploaded_output_names
             normalized = fetch_remote_snapshot(plan.client, problem_id)
-            missing = set(testcases.local) - set(normalized)
+            missing = uploaded_names - set(normalized)
             if missing:
                 raise ValidationError(
-                    "server normalization response omitted local testcases: "
+                    "server normalization response omitted uploaded testcases: "
                     + ", ".join(sorted(missing))
                 )
-            replace_local_snapshot(
-                testcases.directory,
-                {name: normalized[name] for name in testcases.local},
-            )
+            refreshed = dict(testcases.local)
+            for name in uploaded_names:
+                local_case = testcases.local[name]
+                normalized_case = normalized[name]
+                refreshed[name] = TestCaseData(
+                    name,
+                    (normalized_case.input if name in uploaded_input_names else local_case.input),
+                    normalized_case.output if name in uploaded_output_names else local_case.output,
+                )
+            replace_local_snapshot(testcases.directory, refreshed)
 
         _perform(
             f"{prefix} testcase normalization refresh",
@@ -771,6 +789,7 @@ __all__ = [
     "JudgeCompileError",
     "PushClient",
     "PushExecutionError",
+    "PushInterrupted",
     "PushProblemResult",
     "PushResult",
     "PushTarget",
