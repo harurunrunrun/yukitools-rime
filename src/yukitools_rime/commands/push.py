@@ -292,6 +292,13 @@ def _preflight_local(
         raise ValidationError(
             f"{current.path}: --generate requires a local yukicoder_generator declaration"
         )
+    if generate and generator is not None:
+        generator_config = generator.config
+        assert isinstance(generator_config, GeneratorConfig)
+        if not 1 <= generator_config.test_case_num <= 50:
+            raise ValidationError(
+                f"{current.path}: --generate requires test_case_num between 1 and 50"
+            )
     editorial = _document(current, "editorial", required=False)
     testcase_dir: Path | None = None
     testcases: Mapping[str, TestCaseData] | None = None

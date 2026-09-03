@@ -681,3 +681,42 @@ def test_generate_without_local_generator_fails_before_api(tmp_path: Path) -> No
         push(project, make_client, generate=True)
 
     assert not called
+
+
+@pytest.mark.parametrize("test_case_num", [0, 51])
+def test_generate_rejects_server_invalid_case_count_before_api(
+    tmp_path: Path,
+    test_case_num: int,
+) -> None:
+    project = make_project(tmp_path)
+    problem = project.problems[0]
+    assert problem.testset is not None
+    problem.testset.config_path.write_text(
+        render_testset_block(
+            RimeTestsetConfig(
+                GeneratorConfig(
+                    "cpp17",
+                    "generator.cpp",
+                    test_case_num,
+                    "case",
+                    "cxx",
+                ),
+                JudgeConfig("cpp17", "judge.cpp", "cxx"),
+            )
+        ),
+        encoding="utf-8",
+    )
+    called = False
+
+    def make_client(problem: ProblemLayout) -> FakeClient:
+        nonlocal called
+        called = True
+        return FakeClient()
+
+    with pytest.raises(
+        ValidationError,
+        match="test_case_num between 1 and 50",
+    ):
+        push(project, make_client, generate=True)
+
+    assert not called
