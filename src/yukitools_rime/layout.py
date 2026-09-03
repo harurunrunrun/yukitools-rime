@@ -9,6 +9,7 @@ from yukitools_rime.errors import LayoutError, ValidationError
 from yukitools_rime.models import ProblemConfig, ProjectConfig, validate_testcase_name
 from yukitools_rime.rime_config import (
     TestsetConfig,
+    is_managed_configuration,
     parse_problem_config,
     parse_project_config,
     parse_solution_config,
@@ -27,10 +28,10 @@ class TestCaseData:
 
     def __post_init__(self) -> None:
         validate_testcase_name(self.name)
-        if not self.input:
-            raise ValidationError(f"testcase {self.name!r} has an empty input")
-        if not self.output:
-            raise ValidationError(f"testcase {self.name!r} has an empty output")
+        if not isinstance(self.input, bytes):
+            raise ValidationError("testcase input must be bytes")
+        if not isinstance(self.output, bytes):
+            raise ValidationError("testcase output must be bytes")
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,17 +69,40 @@ class ProblemLayout:
     def problem_id(self) -> int:
         return self.config.problem_id
 
-    def testcase_dir(self, project_config: ProjectConfig) -> Path:
-        if self.testset is None:
-            raise LayoutError(f"{self.path}: no direct-child TESTSET was found")
-        directory = self.path / project_config.rime_out_dir / self.testset.path.name
+    def output_dir(self, project_config: ProjectConfig) -> Path:
+        directory = self.path / project_config.rime_out_dir
+        if directory.is_symlink():
+            raise LayoutError(f"Rime output directory must not be a symlink: {directory}")
+        if directory.exists() and not directory.is_dir():
+            raise LayoutError(f"Rime output path must be a directory: {directory}")
         resolved = directory.resolve(strict=False)
         try:
             resolved.relative_to(self.path)
         except ValueError as exc:
             raise LayoutError(
-                f"testcase directory escapes problem root {self.path}: {directory}"
+                f"Rime output directory escapes problem root {self.path}: {directory}"
             ) from exc
+        for config_name in ("PROBLEM", "TESTSET", "SOLUTION"):
+            config_path = directory / config_name
+            if config_path.exists() or config_path.is_symlink():
+                raise LayoutError(
+                    f"rime_out_dir collides with a Rime source directory: {directory}"
+                )
+        return directory
+
+    def testcase_dir(
+        self,
+        project_config: ProjectConfig,
+        *,
+        default_testset_name: str | None = None,
+    ) -> Path:
+        if self.testset is None and default_testset_name is None:
+            raise LayoutError(f"{self.path}: no direct-child TESTSET was found")
+        testset_name = self.testset.path.name if self.testset is not None else default_testset_name
+        assert testset_name is not None
+        directory = self.output_dir(project_config) / testset_name
+        if directory.is_symlink():
+            raise LayoutError(f"testcase directory must not be a symlink: {directory}")
         return directory
 
 
@@ -142,7 +166,11 @@ def _direct_component_dirs(problem_path: Path, filename: str) -> list[Path]:
     except OSError as exc:
         raise LayoutError(f"cannot inspect {problem_path}: {exc}") from exc
     for child in children:
-        if child.is_dir() and not child.is_symlink() and _regular_config(child / filename):
+        if child.is_symlink():
+            if child.is_dir() and _regular_config(child / filename):
+                raise LayoutError(f"symlink target is not allowed: {child}")
+            continue
+        if child.is_dir() and _regular_config(child / filename):
             result.append(child.resolve())
     return result
 
@@ -163,10 +191,12 @@ def load_problem(path: Path) -> ProblemLayout:
             testset_path,
             parse_testset_config(_read(testset_path / "TESTSET")),
         )
-    solutions = tuple(
-        SolutionLayout(item, parse_solution_config(_read(item / "SOLUTION")))
-        for item in _direct_component_dirs(resolved, "SOLUTION")
-    )
+    solutions_list: list[SolutionLayout] = []
+    for item in _direct_component_dirs(resolved, "SOLUTION"):
+        source = _read(item / "SOLUTION")
+        if is_managed_configuration(source, "yukicoder_solution"):
+            solutions_list.append(SolutionLayout(item, parse_solution_config(source)))
+    solutions = tuple(solutions_list)
     return ProblemLayout(resolved, config, testset, solutions)
 
 
@@ -178,10 +208,15 @@ def load_project(root: str | Path) -> ProjectLayout:
     if not _regular_config(project_file):
         raise LayoutError(f"PROJECT not found at {resolved}")
     config = parse_project_config(_read(project_file))
-    problem_paths = _direct_component_dirs(resolved, "PROBLEM")
-    problems = tuple(load_problem(path) for path in problem_paths)
+    problems_list: list[ProblemLayout] = []
+    for path in _direct_component_dirs(resolved, "PROBLEM"):
+        source = _read(path / "PROBLEM")
+        if is_managed_configuration(source, "yukicoder_problem"):
+            problems_list.append(load_problem(path))
+    problems = tuple(problems_list)
     seen: dict[int, Path] = {}
     for problem in problems:
+        problem.output_dir(config)
         previous = seen.get(problem.problem_id)
         if previous is not None:
             raise LayoutError(
@@ -235,11 +270,7 @@ def resolve_target(
         raise LayoutError(f"target is not inside a direct-child Rime problem: {resolved_target}")
     problem = matches[0]
     solution = next(
-        (
-            item
-            for item in problem.solutions
-            if _contained(resolved_target, item.path)
-        ),
+        (item for item in problem.solutions if _contained(resolved_target, item.path)),
         None,
     )
     return TargetSelection(loaded, (problem,), resolved_target, solution)
@@ -252,22 +283,21 @@ def local_testcase_paths(directory: Path, name: str) -> tuple[Path, Path]:
     return directory / f"{name}.in", directory / f"{name}.diff"
 
 
-def read_testcases(
+def inspect_testcases(
     directory: str | Path,
-    *,
-    require_nonempty: bool = True,
-) -> dict[str, TestCaseData]:
-    """Read and validate direct regular .in/.diff pairs as raw bytes."""
+) -> tuple[dict[str, TestCaseData], tuple[str, ...], tuple[str, ...]]:
+    """Read complete pairs and report names that have only one local side."""
 
     root = Path(directory)
     if root.is_symlink():
         raise LayoutError(f"testcase directory must not be a symlink: {root}")
+    if root.exists() and not root.is_dir():
+        raise LayoutError(f"testcase path must be a directory: {root}")
     if not root.is_dir():
-        if require_nonempty:
-            raise LayoutError(f"testcase directory does not exist: {root}")
-        return {}
+        return {}, (), ()
     inputs: dict[str, Path] = {}
     outputs: dict[str, Path] = {}
+    spellings: dict[str, str] = {}
     try:
         entries = tuple(root.iterdir())
     except OSError as exc:
@@ -280,17 +310,49 @@ def read_testcases(
         if entry.is_symlink():
             raise LayoutError(f"testcase path is not a regular file: {entry}")
         if not entry.is_file():
-            continue
+            raise LayoutError(f"testcase path is not a regular file: {entry}")
         if input_file:
             name = entry.name[:-3]
             validate_testcase_name(name)
+            previous = spellings.setdefault(name.casefold(), name)
+            if previous != name:
+                raise LayoutError(
+                    f"case-insensitive testcase name collision: {previous!r} and {name!r}"
+                )
             inputs[name] = entry
         else:
             name = entry.name[:-5]
             validate_testcase_name(name)
+            previous = spellings.setdefault(name.casefold(), name)
+            if previous != name:
+                raise LayoutError(
+                    f"case-insensitive testcase name collision: {previous!r} and {name!r}"
+                )
             outputs[name] = entry
-    missing_outputs = sorted(inputs.keys() - outputs.keys())
-    missing_inputs = sorted(outputs.keys() - inputs.keys())
+    missing_outputs = tuple(sorted(inputs.keys() - outputs.keys()))
+    missing_inputs = tuple(sorted(outputs.keys() - inputs.keys()))
+    result: dict[str, TestCaseData] = {}
+    for name in sorted(inputs.keys() & outputs.keys()):
+        try:
+            input_data = inputs[name].read_bytes()
+            output_data = outputs[name].read_bytes()
+        except OSError as exc:
+            raise LayoutError(f"cannot read testcase {name!r}: {exc}") from exc
+        result[name] = TestCaseData(name, input_data, output_data)
+    return result, missing_outputs, missing_inputs
+
+
+def read_testcases(
+    directory: str | Path,
+    *,
+    require_nonempty: bool = True,
+) -> dict[str, TestCaseData]:
+    """Read and validate direct regular .in/.diff pairs as raw bytes."""
+
+    root = Path(directory)
+    if require_nonempty and not root.is_dir():
+        raise LayoutError(f"testcase directory does not exist: {root}")
+    result, missing_outputs, missing_inputs = inspect_testcases(root)
     if missing_outputs or missing_inputs:
         details: list[str] = []
         if missing_outputs:
@@ -298,14 +360,14 @@ def read_testcases(
         if missing_inputs:
             details.append("missing .in for " + ", ".join(missing_inputs))
         raise LayoutError(f"incomplete testcase pairs in {root}: {'; '.join(details)}")
-    if require_nonempty and not inputs:
+    if require_nonempty and not result:
         raise LayoutError(f"no testcase pairs found in {root}")
-    result: dict[str, TestCaseData] = {}
-    for name in sorted(inputs):
-        try:
-            result[name] = TestCaseData(name, inputs[name].read_bytes(), outputs[name].read_bytes())
-        except OSError as exc:
-            raise LayoutError(f"cannot read testcase {name!r}: {exc}") from exc
+    if require_nonempty:
+        for name, case in result.items():
+            if not case.input:
+                raise LayoutError(f"testcase {name!r} has an empty input")
+            if not case.output:
+                raise LayoutError(f"testcase {name!r} has an empty output")
     return result
 
 

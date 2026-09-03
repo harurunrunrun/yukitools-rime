@@ -22,10 +22,19 @@ from yukitools_rime.models import (
 
 def settings(**changes: object) -> ProblemSettings:
     values: dict[str, object] = {
-        "title": "Title", "tags": "graph", "level": 2.5,
-        "time_limit_ms": 2000, "memory_limit": 512, "eps_mode": "-", "eps": "0",
-        "wip": True, "recruiting_tester": False, "problem_type": 0, "judge_type": 0,
-        "show_ans": True, "allowed_langs": ["cpp23"],
+        "title": "Title",
+        "tags": "graph",
+        "level": 2.5,
+        "time_limit_ms": 2000,
+        "memory_limit": 512,
+        "eps_mode": "-",
+        "eps": "0",
+        "wip": True,
+        "recruiting_tester": False,
+        "problem_type": 0,
+        "judge_type": 0,
+        "show_ans": True,
+        "allowed_langs": ["cpp23"],
     }
     values.update(changes)
     return ProblemSettings(**values)  # type: ignore[arg-type]
@@ -58,8 +67,15 @@ def test_settings_api_round_trip_and_defaults() -> None:
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("title", ""), ("level", float("nan")), ("time_limit_ms", 0),
-     ("memory_limit", True), ("eps_mode", "bad"), ("wip", 1), ("allowed_langs", [""])],
+    [
+        ("title", ""),
+        ("level", float("nan")),
+        ("time_limit_ms", 0),
+        ("memory_limit", True),
+        ("eps_mode", "bad"),
+        ("wip", 1),
+        ("allowed_langs", [""]),
+    ],
 )
 def test_settings_reject_invalid_fields(field: str, value: object) -> None:
     with pytest.raises(ValidationError):
@@ -74,11 +90,10 @@ def test_problem_config_omits_local_fields_from_api() -> None:
 
 def test_statement_fields_are_exclusive_and_protected() -> None:
     assert Statement.markdown("# x").to_api_fields(require_nonempty=True) == {
-        "html": "", "markdown": "# x"
+        "html": "",
+        "markdown": "# x",
     }
-    assert Statement.html("<p>x</p>").to_api_fields(require_nonempty=True) == {
-        "html": "<p>x</p>"
-    }
+    assert Statement.html("<p>x</p>").to_api_fields(require_nonempty=True) == {"html": "<p>x</p>"}
     with pytest.raises(ValidationError):
         Statement.markdown(" \n").to_api_fields(require_nonempty=True)
 
@@ -90,7 +105,7 @@ def test_tool_configs_canonicalize_sequences() -> None:
     assert solution.challenge_cases == ("sample.1",)
 
 
-@pytest.mark.parametrize("name", ["", ".", "..", "../x", "a/b", "a\\b"])
+@pytest.mark.parametrize("name", ["", ".", "..", "../x", "a/b", "a\\b", "CON", "nul.txt"])
 def test_basename_rejects_paths(name: str) -> None:
     with pytest.raises(ValidationError):
         validate_basename(name)
@@ -100,6 +115,35 @@ def test_basename_rejects_paths(name: str) -> None:
 def test_testcase_name_rejects_unsafe_alphabet(name: str) -> None:
     with pytest.raises(ValidationError):
         validate_testcase_name(name)
+
+
+@pytest.mark.parametrize(
+    "rime_out_dir",
+    [
+        "#comment",
+        "!negated",
+        "glob*",
+        "glob?",
+        "group[0]",
+        "line\nbreak",
+        "tab\tname",
+        "tests.",
+        "CON",
+        "com1.cache",
+        "LPT9",
+        "space name",
+    ],
+)
+def test_project_rejects_rime_output_names_unsafe_for_gitignore(
+    rime_out_dir: str,
+) -> None:
+    with pytest.raises(ValidationError, match="rime_out_dir"):
+        ProjectConfig(rime_out_dir=rime_out_dir)
+
+
+@pytest.mark.parametrize("rime_out_dir", ["rime-out", "generated_2", "out.v1"])
+def test_project_accepts_portable_rime_output_names(rime_out_dir: str) -> None:
+    assert ProjectConfig(rime_out_dir=rime_out_dir).rime_out_dir == rime_out_dir
 
 
 def test_project_and_enums() -> None:

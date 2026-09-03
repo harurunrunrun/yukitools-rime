@@ -18,8 +18,19 @@ from yukitools_rime.layout import (
 from yukitools_rime.layout import (
     testcase_change_counts as change_counts,
 )
-from yukitools_rime.models import ProblemConfig, ProblemSettings, ProjectConfig
-from yukitools_rime.rime_config import render_problem_block, render_project_block
+from yukitools_rime.models import (
+    ProblemConfig,
+    ProblemSettings,
+    ProjectConfig,
+    SolutionConfig,
+)
+from yukitools_rime.rime_config import (
+    BEGIN_MARKER,
+    END_MARKER,
+    render_problem_block,
+    render_project_block,
+    render_solution_block,
+)
 
 
 def make_problem(root: Path, name: str, problem_id: int) -> Path:
@@ -42,13 +53,16 @@ def test_shallow_discovery_and_target_resolution(tmp_path: Path) -> None:
     (tests / "TESTSET").write_text("", encoding="utf-8")
     nested = problem / "nested"
     nested.mkdir()
-    (nested / "PROBLEM").write_text(render_problem_block(
-        ProblemConfig(
-            99,
-            ProblemSettings("nested", "", 1, 1000, 256, "-", "0", False, False, 0, 0),
-            "N",
-        )
-    ), encoding="utf-8")
+    (nested / "PROBLEM").write_text(
+        render_problem_block(
+            ProblemConfig(
+                99,
+                ProblemSettings("nested", "", 1, 1000, 256, "-", "0", False, False, 0, 0),
+                "N",
+            )
+        ),
+        encoding="utf-8",
+    )
     project = discover_project(tests)
     assert [item.problem_id for item in project.problems] == [1]
     selected = resolve_target(tests)
@@ -98,9 +112,7 @@ def test_change_counts() -> None:
 def test_missing_and_multiple_direct_testsets_are_distinguished(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "PROJECT").write_text(
-        render_project_block(ProjectConfig()), encoding="utf-8"
-    )
+    (tmp_path / "PROJECT").write_text(render_project_block(ProjectConfig()), encoding="utf-8")
     problem = make_problem(tmp_path, "a", 1)
     assert load_project(tmp_path).problems[0].testset is None
 
@@ -115,9 +127,7 @@ def test_missing_and_multiple_direct_testsets_are_distinguished(
 def test_target_symlink_cannot_escape_an_explicit_project(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
-    (root / "PROJECT").write_text(
-        render_project_block(ProjectConfig()), encoding="utf-8"
-    )
+    (root / "PROJECT").write_text(render_project_block(ProjectConfig()), encoding="utf-8")
     problem = make_problem(root, "a", 1)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -134,9 +144,7 @@ def test_target_symlink_cannot_escape_an_explicit_project(tmp_path: Path) -> Non
 def test_testcase_output_symlink_cannot_escape_problem(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
-    (root / "PROJECT").write_text(
-        render_project_block(ProjectConfig()), encoding="utf-8"
-    )
+    (root / "PROJECT").write_text(render_project_block(ProjectConfig()), encoding="utf-8")
     problem_path = make_problem(root, "a", 1)
     tests = problem_path / "tests"
     tests.mkdir()
@@ -148,9 +156,8 @@ def test_testcase_output_symlink_cannot_escape_problem(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symlinks unavailable")
 
-    problem = load_project(root).problems[0]
-    with pytest.raises(LayoutError, match="escapes problem root"):
-        problem.testcase_dir(ProjectConfig())
+    with pytest.raises(LayoutError, match="symlink"):
+        load_project(root)
 
 
 def test_case_looking_symlink_is_rejected_without_reading_target(
@@ -174,3 +181,96 @@ def test_invalid_utf8_project_is_a_configuration_error(tmp_path: Path) -> None:
     (tmp_path / "PROJECT").write_bytes(b"\xff")
     with pytest.raises(ConfigError, match="UTF-8"):
         load_project(tmp_path)
+
+
+def test_unmanaged_problem_is_ignored_beside_managed_problem(tmp_path: Path) -> None:
+    (tmp_path / "PROJECT").write_text(render_project_block(ProjectConfig()), encoding="utf-8")
+    managed = make_problem(tmp_path, "managed", 1)
+    unmanaged = tmp_path / "unmanaged"
+    unmanaged.mkdir()
+    (unmanaged / "PROBLEM").write_text(
+        'problem(time_limit=1.0, id="B")\n',
+        encoding="utf-8",
+    )
+
+    project = load_project(tmp_path)
+
+    assert [problem.path for problem in project.problems] == [managed.resolve()]
+
+
+def test_unmanaged_solution_is_ignored_beside_managed_solution(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "PROJECT").write_text(render_project_block(ProjectConfig()), encoding="utf-8")
+    problem = make_problem(tmp_path, "a", 1)
+    unmanaged = problem / "plain"
+    unmanaged.mkdir()
+    (unmanaged / "SOLUTION").write_text(
+        'cxx_solution("main.cpp")\n',
+        encoding="utf-8",
+    )
+    managed = problem / "submit"
+    managed.mkdir()
+    (managed / "SOLUTION").write_text(
+        render_solution_block(SolutionConfig("cpp23", "main.cpp", "cxx")),
+        encoding="utf-8",
+    )
+
+    loaded = load_project(tmp_path).problems[0]
+
+    assert [solution.path for solution in loaded.solutions] == [managed.resolve()]
+
+
+@pytest.mark.parametrize(
+    "testset_source",
+    [
+        f"{BEGIN_MARKER}\n# missing end marker\n",
+        f"# missing begin marker\n{END_MARKER}\n",
+    ],
+)
+def test_optional_testset_declarations_reject_incomplete_managed_markers(
+    tmp_path: Path,
+    testset_source: str,
+) -> None:
+    (tmp_path / "PROJECT").write_text(render_project_block(ProjectConfig()), encoding="utf-8")
+    problem = make_problem(tmp_path, "a", 1)
+    tests = problem / "tests"
+    tests.mkdir()
+    (tests / "TESTSET").write_text(testset_source, encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="marker"):
+        load_project(tmp_path)
+
+
+def test_rime_output_directory_cannot_alias_testset_source(tmp_path: Path) -> None:
+    (tmp_path / "PROJECT").write_text(
+        render_project_block(ProjectConfig(rime_out_dir="generated")),
+        encoding="utf-8",
+    )
+    problem = make_problem(tmp_path, "a", 1)
+    output = problem / "generated"
+    output.mkdir()
+    (output / "TESTSET").write_text("", encoding="utf-8")
+
+    with pytest.raises(LayoutError, match="collides"):
+        load_project(tmp_path)
+
+
+def test_testcase_component_output_must_not_be_a_symlink(tmp_path: Path) -> None:
+    (tmp_path / "PROJECT").write_text(render_project_block(ProjectConfig()), encoding="utf-8")
+    problem_path = make_problem(tmp_path, "a", 1)
+    tests = problem_path / "tests"
+    tests.mkdir()
+    (tests / "TESTSET").write_text("", encoding="utf-8")
+    output = problem_path / "rime-out"
+    output.mkdir()
+    outside = tmp_path / "outside-cases"
+    outside.mkdir()
+    try:
+        (output / "tests").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    problem = load_project(tmp_path).problems[0]
+    with pytest.raises(LayoutError, match="symlink"):
+        problem.testcase_dir(ProjectConfig())

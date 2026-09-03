@@ -38,6 +38,14 @@ EPS_MODE_LABELS: dict[str, str] = {
 
 _CAMEL_BOUNDARY = re.compile(r"_([a-zA-Z0-9])")
 _SAFE_CASE_NAME = re.compile(r"[A-Za-z0-9._]+\Z")
+_SAFE_RIME_OUT_DIR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)}
+)
+_RESERVED_RIME_OUT_DIRS = frozenset(
+    {"problem", "tests", "statement.md", "statement.html", "editorial.md", "editorial.html"}
+)
 _MISSING = object()
 
 
@@ -119,7 +127,7 @@ def normalize_eps(value: str | int | float | Decimal) -> str:
     try:
         parsed = Decimal(result)
     except InvalidOperation as exc:
-        raise ValidationError(f"eps must be numeric: {result!r}") from exc
+        raise ValidationError("eps must be numeric") from exc
     if not parsed.is_finite():
         raise ValidationError("eps must be finite")
     return result
@@ -134,6 +142,13 @@ def validate_basename(name: str, *, label: str = "path") -> str:
         raise ValidationError(f"{label} must be a non-empty file name")
     if PurePath(name).name != name or "/" in name or "\\" in name:
         raise ValidationError(f"{label} must be a file name, not a path: {name!r}")
+    if name.endswith((".", " ")):
+        raise ValidationError(f"{label} must not end with a dot or space")
+    if any(ord(character) < 32 or character in '<>:"|?*' for character in name):
+        raise ValidationError(f"{label} contains a character unsupported on Windows")
+    device_stem = name.split(".", 1)[0].upper()
+    if device_stem in _WINDOWS_DEVICE_NAMES:
+        raise ValidationError(f"{label} is a reserved Windows device name")
     return name
 
 
@@ -201,8 +216,16 @@ class ProjectConfig:
             raise ValidationError("base_url must not contain user credentials")
         self.base_url = base_url
         self.rime_out_dir = validate_basename(self.rime_out_dir, label="rime_out_dir")
-        if self.rime_out_dir.startswith("."):
-            raise ValidationError("rime_out_dir must not be hidden")
+        if _SAFE_RIME_OUT_DIR.fullmatch(self.rime_out_dir) is None:
+            raise ValidationError(
+                "rime_out_dir must start with an ASCII letter or digit and contain "
+                "only ASCII letters, digits, '.', '_', and '-'"
+            )
+
+        if self.rime_out_dir.casefold() in _RESERVED_RIME_OUT_DIRS:
+            raise ValidationError(
+                f"rime_out_dir conflicts with a reserved problem path: {self.rime_out_dir}"
+            )
 
 
 @dataclass(slots=True)
@@ -233,9 +256,7 @@ class ProblemSettings:
         self.level = float(self.level)
         if not math.isfinite(self.level) or self.level < 0:
             raise ValidationError("level must be a finite non-negative number")
-        self.time_limit_ms = _integer(
-            self.time_limit_ms, label="time_limit_ms", minimum=1
-        )
+        self.time_limit_ms = _integer(self.time_limit_ms, label="time_limit_ms", minimum=1)
         self.memory_limit = _integer(self.memory_limit, label="memory_limit", minimum=1)
         self.eps_mode = _string(self.eps_mode, label="eps_mode", empty=False)
         if self.eps_mode not in EPS_MODE_LABELS:
@@ -243,9 +264,7 @@ class ProblemSettings:
             raise ValidationError(f"eps_mode must be one of {allowed}")
         self.eps = normalize_eps(self.eps)
         self.wip = _boolean(self.wip, label="wip")
-        self.recruiting_tester = _boolean(
-            self.recruiting_tester, label="recruiting_tester"
-        )
+        self.recruiting_tester = _boolean(self.recruiting_tester, label="recruiting_tester")
         self.problem_type = _integer(self.problem_type, label="problem_type", minimum=0)
         self.judge_type = _integer(self.judge_type, label="judge_type", minimum=0)
         self.show_ans = _boolean(self.show_ans, label="show_ans")
@@ -257,9 +276,7 @@ class ProblemSettings:
             raise ValidationError("allowed_langs must be a list of strings")
         normalized_langs: list[str] = []
         for index, lang in enumerate(self.allowed_langs):
-            normalized_langs.append(
-                _string(lang, label=f"allowed_langs[{index}]", empty=False)
-            )
+            normalized_langs.append(_string(lang, label=f"allowed_langs[{index}]", empty=False))
         self.allowed_langs = tuple(normalized_langs)
 
     def to_api_dict(self) -> dict[str, JsonValue]:
@@ -350,9 +367,9 @@ class GeneratorConfig:
     def __post_init__(self) -> None:
         self.lang_id = _string(self.lang_id, label="lang_id", empty=False)
         self.src = validate_basename(self.src, label="generator src")
-        self.test_case_num = _integer(
-            self.test_case_num, label="test_case_num", minimum=0
-        )
+        if self.src.casefold() == "testset":
+            raise ValidationError("generator src must not name TESTSET")
+        self.test_case_num = _integer(self.test_case_num, label="test_case_num", minimum=0)
         if self.prefix is not None:
             self.prefix = validate_testcase_name(self.prefix, label="generator prefix")
         self.rime_kind = _validate_rime_kind(self.rime_kind)
@@ -360,9 +377,7 @@ class GeneratorConfig:
             dict[str, object], _literal_mapping(self.rime_options, label="rime_options")
         )
 
-    def to_api_dict(
-        self, *, source: str, generate: bool | None = None
-    ) -> dict[str, JsonValue]:
+    def to_api_dict(self, *, source: str, generate: bool | None = None) -> dict[str, JsonValue]:
         result: dict[str, JsonValue] = {
             "langId": self.lang_id,
             "source": _string(source, label="generator source"),
@@ -387,6 +402,8 @@ class JudgeConfig:
     def __post_init__(self) -> None:
         self.lang_id = _string(self.lang_id, label="lang_id", empty=False)
         self.src = validate_basename(self.src, label="judge src")
+        if self.src.casefold() == "testset":
+            raise ValidationError("judge src must not name TESTSET")
         self.rime_kind = _validate_rime_kind(self.rime_kind)
         self.rime_options = cast(
             dict[str, object], _literal_mapping(self.rime_options, label="rime_options")
@@ -409,6 +426,8 @@ class SolutionConfig:
     def __post_init__(self) -> None:
         self.lang_id = _string(self.lang_id, label="lang_id", empty=False)
         self.src = validate_basename(self.src, label="solution src")
+        if self.src.casefold() == "solution":
+            raise ValidationError("solution src must not name SOLUTION")
         self.rime_kind = _validate_rime_kind(self.rime_kind)
         if not isinstance(self.challenge_cases, (list, tuple)):
             raise ValidationError("challenge_cases must be a list of testcase names")
