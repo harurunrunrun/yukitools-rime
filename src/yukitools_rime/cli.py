@@ -19,7 +19,7 @@ from yukitools_rime.auth import AuthError, resolve_token
 from yukitools_rime.commands.push import (
     ClientFactory as PushClientFactory,
 )
-from yukitools_rime.commands.push import push
+from yukitools_rime.commands.push import PushInterrupted, push
 from yukitools_rime.commands.query import (
     ProblemClientFactory as QueryClientFactory,
 )
@@ -49,8 +49,31 @@ from yukitools_rime.layout import (
     find_project_root,
     resolve_target,
 )
-from yukitools_rime.models import ProjectConfig, Which
+from yukitools_rime.models import ProjectConfig, Which, validate_basename
 from yukitools_rime.testcase_sync import SnapshotChanges
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("1以上の整数で指定してください") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("1以上の整数で指定してください")
+    return parsed
+
+
+def _direct_name(value: str) -> str:
+    try:
+        return validate_basename(value, label="--dir")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("直下のディレクトリ名を1要素で指定してください") from exc
+
+
+def _nonempty_text(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError("空白だけの値は指定できません")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,20 +81,16 @@ def build_parser() -> argparse.ArgumentParser:
         prog="yukitools-rime",
         description="Rimeプロジェクトからyukicoderの問題を管理する",
     )
-    parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {__version__}"
-    )
-    commands = parser.add_subparsers(
-        dest="command", metavar="COMMAND", required=True
-    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    commands = parser.add_subparsers(dest="command", metavar="COMMAND", required=True)
 
     command = commands.add_parser("init", help="Rimeプロジェクトを初期化する")
     command.add_argument("project", nargs="?", default=".", metavar="PROJECT")
 
     command = commands.add_parser("new", help="新しいRime問題を取得する")
-    command.add_argument("problem_id", type=int, metavar="問題ID")
+    command.add_argument("problem_id", type=_positive_int, metavar="問題ID")
     command.add_argument("--project", metavar="PATH")
-    command.add_argument("--dir", dest="dir_name", metavar="NAME")
+    command.add_argument("--dir", dest="dir_name", type=_direct_name, metavar="NAME")
     command.add_argument("--testcases", action="store_true")
 
     command = commands.add_parser("pull", help="サーバーの内容をローカルへ反映する")
@@ -96,10 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     command.add_argument("solution", nargs="?", default=".", metavar="SOLUTION")
 
     command = commands.add_parser("solution", help="提出を想定解として登録または解除する")
-    command.add_argument("submission_id", type=int, metavar="提出ID")
+    command.add_argument("submission_id", type=_positive_int, metavar="提出ID")
     command.add_argument("target", nargs="?", default=".", metavar="TARGET")
     mode = command.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--summary", metavar="TEXT")
+    mode.add_argument("--summary", type=_nonempty_text, metavar="TEXT")
     mode.add_argument("--delete", action="store_true")
 
     command = commands.add_parser("testcases", help="サーバー側のケース名だけを表示する")
@@ -117,19 +136,16 @@ class ClientPool:
     def __init__(self) -> None:
         self._clients: list[YukicoderClient] = []
 
-    def _new(
-        self, root: Path, config: ProjectConfig, problem_id: int
-    ) -> YukicoderClient:
-        client = YukicoderClient(
-            resolve_token(root, problem_id),
-            config.base_url,
-        )
+    def _new(self, root: Path, config: ProjectConfig, problem_id: int) -> YukicoderClient:
+        token = resolve_token(root, problem_id)
+        try:
+            client = YukicoderClient(token, config.base_url)
+        except ValueError as exc:
+            raise AuthError(f"API接続設定が不正です: {exc}") from exc
         self._clients.append(client)
         return client
 
-    def scaffold(
-        self, root: Path, config: ProjectConfig, problem_id: int
-    ) -> YukicoderClient:
+    def scaffold(self, root: Path, config: ProjectConfig, problem_id: int) -> YukicoderClient:
         return self._new(root, config, problem_id)
 
     def problem(self, problem: ProblemLayout) -> YukicoderClient:
@@ -243,9 +259,7 @@ def _dispatch(
                 selection,
                 cast(SyncClientFactory, problem_factory),
                 include_testcases=args.testcases,
-                confirm=_confirm_testcases(
-                    args.yes, stdin, stderr, noninteractive
-                ),
+                confirm=_confirm_testcases(args.yes, stdin, stderr, noninteractive),
             )
             _show_pull(pull_result, stdout, stderr)
             return 1 if noninteractive[0] else 0
@@ -313,9 +327,7 @@ def _dispatch(
             )
             if submit_result.submission_id is None:
                 _line(stdout, f"提出しました: 問題 {submit_result.problem_id}")
-                response = submit_result.raw_response.strip()
-                if response:
-                    _line(stdout, f"サーバーレスポンス: {response}")
+                _line(stderr, "警告: 提出IDをサーバー応答から判別できませんでした。")
             else:
                 _line(
                     stdout,
@@ -357,6 +369,9 @@ def main(
         return 0
     try:
         return _dispatch(args, stdin=input_stream, stdout=output, stderr=errors)
+    except PushInterrupted as exc:
+        _line(errors, f"中断しました。{exc}")
+        return 130
     except KeyboardInterrupt:
         _line(errors, "中断しました。")
         return 130

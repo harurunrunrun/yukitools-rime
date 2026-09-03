@@ -63,6 +63,25 @@ def test_parser_exposes_exact_commands_and_options() -> None:
     assert caught.value.code == 2
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["new", "0"],
+        ["new", "-1"],
+        ["new", "1", "--dir", "../escape"],
+        ["new", "1", "--dir", "nested/problem"],
+        ["solution", "0", "--delete"],
+        ["solution", "-1", "--delete"],
+        ["solution", "1", "--summary", " \t "],
+    ],
+)
+def test_invalid_cli_values_are_argparse_errors(argv: list[str]) -> None:
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit) as caught:
+        parser.parse_args(argv)
+    assert caught.value.code == 2
+
+
 def test_diff_exit_code_is_three_only_when_requested(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -292,15 +311,19 @@ def test_submit_reports_success_when_response_has_no_submission_id(
         lambda *args: SimpleNamespace(
             problem_id=1,
             submission_id=None,
-            raw_response='{"accepted":true}',
+            raw_response='Bearer top-secret {"accepted":true}',
         ),
     )
     stdin, stdout, stderr = streams()
     assert cli.main(["submit"], stdin=stdin, stdout=stdout, stderr=stderr) == 0
-    assert "提出しました: 問題 1" in stdout.getvalue()
-    assert 'サーバーレスポンス: {"accepted":true}' in stdout.getvalue()
-    assert "提出ID" not in stdout.getvalue()
-    assert stderr.getvalue() == ""
+    output = stdout.getvalue()
+    errors = stderr.getvalue()
+    assert "提出しました: 問題 1" in output
+    assert "提出ID" not in output
+    assert "サーバーレスポンス" not in output
+    assert "accepted" not in output + errors
+    assert "top-secret" not in output + errors
+    assert "提出IDをサーバー応答から判別できませんでした" in errors
 
 
 def test_expected_errors_and_interrupt_have_stable_codes(
