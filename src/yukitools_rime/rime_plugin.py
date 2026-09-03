@@ -27,9 +27,7 @@ _active: dict[str, _Handler] = {}
 def _invoke(kind: str, **kwargs: object) -> None:
     handler = _active.get(kind)
     if handler is None:
-        raise RuntimeError(
-            f"{kind}() is only available while Rime is loading its matching config"
-        )
+        raise RuntimeError(f"{kind}() is only available while Rime is loading its matching config")
     handler(**kwargs)
 
 
@@ -140,7 +138,68 @@ def yukicoder_solution(
     )
 
 
+def _is_within(root: str, candidate: str) -> bool:
+    try:
+        return os.path.commonpath(
+            (os.path.realpath(root), os.path.realpath(candidate))
+        ) == os.path.realpath(root)
+    except ValueError:
+        return False
+
+
+def _validate_regular_source(target: Any, src: str) -> None:
+    source_dir = getattr(target, "src_dir", None)
+    if not isinstance(source_dir, str):
+        return
+    problem_dir = getattr(getattr(target, "problem", None), "base_dir", None)
+    if os.path.islink(source_dir) or (
+        isinstance(problem_dir, str) and not _is_within(problem_dir, source_dir)
+    ):
+        raise RuntimeError(f"Rime source directory is unsafe: {source_dir}")
+    source = os.path.join(source_dir, src)
+    if (
+        os.path.islink(source)
+        or not os.path.isfile(source)
+        or os.path.dirname(os.path.realpath(source)) != os.path.realpath(source_dir)
+    ):
+        raise RuntimeError(f"source must be a direct regular file: {source}")
+
+
+def _validated_problem_output(
+    base_dir: str,
+    config: ProjectConfig,
+    project_dir: str | None = None,
+) -> str:
+    if os.path.islink(base_dir) or (
+        project_dir is not None and not _is_within(project_dir, base_dir)
+    ):
+        raise RuntimeError(f"Rime problem directory is unsafe: {base_dir}")
+    output = os.path.join(base_dir, config.rime_out_dir)
+    if not _is_within(base_dir, output):
+        raise RuntimeError(f"Rime output directory escapes problem root: {output}")
+    if os.path.islink(output):
+        raise RuntimeError(f"Rime output directory must not be a symlink: {output}")
+    if os.path.lexists(output) and not os.path.isdir(output):
+        raise RuntimeError(f"Rime output path must be a directory: {output}")
+    for config_name in ("PROBLEM", "TESTSET", "SOLUTION"):
+        if os.path.lexists(os.path.join(output, config_name)):
+            raise RuntimeError(f"rime_out_dir collides with a Rime source directory: {output}")
+    return output
+
+
+def _validate_component_output(target: Any) -> None:
+    output = getattr(target, "out_dir", None)
+    root = getattr(getattr(target, "problem", None), "out_dir", None)
+    if not isinstance(output, str) or not isinstance(root, str):
+        return
+    if os.path.islink(output) or not _is_within(root, output):
+        raise RuntimeError(f"Rime component output directory is unsafe: {output}")
+    if os.path.lexists(output) and not os.path.isdir(output):
+        raise RuntimeError(f"Rime component output path must be a directory: {output}")
+
+
 def _register_code(target: Any, config: Any, suffix: str, *, solution: bool = False) -> None:
+    _validate_regular_source(target, config.src)
     if config.rime_kind is None:
         return
     name = f"{config.rime_kind}_{suffix}"
@@ -192,12 +251,11 @@ def _problem_adapter(base: type[Any]) -> type[Any]:
 
         def PreLoad(self, ui: Any) -> None:
             super().PreLoad(ui)
-            project_config = getattr(
-                getattr(self, "project", None), "yukicoder_config", None
-            )
+            project = getattr(self, "project", None)
+            project_config = getattr(project, "yukicoder_config", None)
             if project_config is not None:
-                self.out_dir = os.path.join(
-                    self.base_dir, project_config.rime_out_dir
+                self.out_dir = _validated_problem_output(
+                    self.base_dir, project_config, getattr(project, "base_dir", None)
                 )
             self.yukicoder_config = None
             rime_problem = self.exports["problem"]
@@ -207,10 +265,21 @@ def _problem_adapter(base: type[Any]) -> type[Any]:
                     raise RuntimeError("multiple yukicoder_problem() declarations")
                 values = dict(kwargs)
                 setting_names = {
-                    "title", "tags", "level", "time_limit_ms", "memory_limit",
-                    "eps_mode", "eps", "wip", "recruiting_tester", "problem_type",
-                    "judge_type", "show_ans", "enable_pure_judge",
-                    "force_single_server_judge", "allowed_langs",
+                    "title",
+                    "tags",
+                    "level",
+                    "time_limit_ms",
+                    "memory_limit",
+                    "eps_mode",
+                    "eps",
+                    "wip",
+                    "recruiting_tester",
+                    "problem_type",
+                    "judge_type",
+                    "show_ans",
+                    "enable_pure_judge",
+                    "force_single_server_judge",
+                    "allowed_langs",
                 }
                 setting_values = {
                     key: values.pop(key) for key in tuple(values) if key in setting_names
@@ -239,9 +308,10 @@ def _problem_adapter(base: type[Any]) -> type[Any]:
             _active["yukicoder_problem"] = define
 
         def PostLoad(self, ui: Any) -> None:
-            if self.yukicoder_config is None:
-                raise RuntimeError("yukicoder_problem() declaration is missing")
             try:
+                if self.yukicoder_config is None:
+                    super().PostLoad(ui)
+                    return
                 super().PostLoad(ui)
                 solutions = getattr(self, "solutions", None)
                 if solutions is not None:
@@ -272,6 +342,7 @@ def _testset_adapter(base: type[Any]) -> type[Any]:
 
         def PreLoad(self, ui: Any) -> None:
             super().PreLoad(ui)
+            _validate_component_output(self)
             self.yukicoder_generator_config = None
             self.yukicoder_judge_config = None
 
@@ -279,14 +350,32 @@ def _testset_adapter(base: type[Any]) -> type[Any]:
                 if self.yukicoder_generator_config is not None:
                     raise RuntimeError("multiple yukicoder_generator() declarations")
                 config = GeneratorConfig(**kwargs)  # type: ignore[arg-type]
+                judge_config = self.yukicoder_judge_config
+                if (
+                    judge_config is not None
+                    and judge_config.src.casefold() == config.src.casefold()
+                ):
+                    raise RuntimeError("generator and judge source files must be distinct")
                 _register_code(self, config, "generator")
                 self.yukicoder_generator_config = config
 
             def judge(**kwargs: object) -> None:
                 if self.yukicoder_judge_config is not None:
                     raise RuntimeError("multiple yukicoder_judge() declarations")
+                generator_config = self.yukicoder_generator_config
                 config = JudgeConfig(**kwargs)  # type: ignore[arg-type]
-                _register_code(self, config, "judge")
+                if (
+                    generator_config is not None
+                    and generator_config.src.casefold() == config.src.casefold()
+                ):
+                    raise RuntimeError("generator and judge source files must be distinct")
+                problem = getattr(self, "problem", None)
+                if getattr(problem, "judge_type", None) == 0:
+                    # Keep the remote source available for synchronization, but
+                    # do not change ordinary Rime output comparison semantics.
+                    _validate_regular_source(self, config.src)
+                else:
+                    _register_code(self, config, "judge")
                 self.yukicoder_judge_config = config
 
             self.exports["yukicoder_generator"] = generator
@@ -312,6 +401,7 @@ def _solution_adapter(base: type[Any]) -> type[Any]:
 
         def PreLoad(self, ui: Any) -> None:
             super().PreLoad(ui)
+            _validate_component_output(self)
             self.yukicoder_config = None
             self.yukicoder_sync_only = False
 
@@ -327,9 +417,10 @@ def _solution_adapter(base: type[Any]) -> type[Any]:
             _active["yukicoder_solution"] = define
 
         def PostLoad(self, ui: Any) -> None:
-            if self.yukicoder_config is None:
-                raise RuntimeError("yukicoder_solution() declaration is missing")
             try:
+                if self.yukicoder_config is None:
+                    super().PostLoad(ui)
+                    return
                 if self.yukicoder_sync_only:
                     codes = getattr(self, "_codes", None)
                     if isinstance(codes, list):

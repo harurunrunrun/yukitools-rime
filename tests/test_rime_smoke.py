@@ -44,9 +44,11 @@ def test_reference_rime_loads_all_managed_configurations(tmp_path: Path) -> None
     problem = project / "a"
     testset = problem / "tests"
     solution = problem / "solution"
+    ordinary_solution = problem / "ordinary"
     unknown_solution = problem / "unknown"
     testset.mkdir(parents=True)
     solution.mkdir()
+    ordinary_solution.mkdir()
     unknown_solution.mkdir()
 
     (project / "PROJECT").write_text(
@@ -106,6 +108,10 @@ def test_reference_rime_loads_all_managed_configurations(tmp_path: Path) -> None
         ),
         encoding="utf-8",
     )
+    (ordinary_solution / "SOLUTION").write_text(
+        'cxx_solution("main.cpp")\n',
+        encoding="utf-8",
+    )
     (unknown_solution / "SOLUTION").write_text(
         render_solution_block(
             SolutionConfig(
@@ -123,6 +129,10 @@ def test_reference_rime_loads_all_managed_configurations(tmp_path: Path) -> None
         unknown_solution / "main.txt",
     ):
         path.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    (ordinary_solution / "main.cpp").write_text(
+        "int main() { return 0; }\n",
+        encoding="utf-8",
+    )
 
     env = os.environ.copy()
     source_root = Path(__file__).resolve().parents[1] / "src"

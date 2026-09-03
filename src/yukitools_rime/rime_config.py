@@ -8,9 +8,11 @@ arguments can be handled by ast.literal_eval.
 from __future__ import annotations
 
 import ast
+import io
 import os
 import pprint
 import tempfile
+import tokenize
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,6 +79,14 @@ class TestsetConfig:
     generator: GeneratorConfig | None = None
     judge: JudgeConfig | None = None
 
+    def __post_init__(self) -> None:
+        if (
+            self.generator is not None
+            and self.judge is not None
+            and self.generator.src.casefold() == self.judge.src.casefold()
+        ):
+            raise ConfigError("generator and judge source files must be distinct")
+
 
 def _syntax_error(exc: SyntaxError) -> ConfigError:
     location = f" at line {exc.lineno}" if exc.lineno is not None else ""
@@ -108,6 +118,77 @@ def _literal(node: ast.expr, *, function: str, keyword: str) -> object:
         ) from exc
 
 
+def _physical_marker_spans(source: str, marker: str) -> tuple[tuple[int, int], ...]:
+    """Locate exact marker lines in a non-Python text file."""
+
+    spans: list[tuple[int, int]] = []
+    offset = 0
+    for line in source.splitlines(keepends=True):
+        logical = line.rstrip("\r\n")
+        line_start = offset
+        if offset == 0 and logical.startswith("\ufeff"):
+            logical = logical[1:]
+            line_start += 1
+        if logical == marker:
+            spans.append((line_start, line_start + len(marker)))
+        offset += len(line)
+    return tuple(spans)
+
+
+def _marker_spans(source: str, marker: str) -> tuple[tuple[int, int], ...]:
+    """Locate marker lines without matching marker text inside literals."""
+
+    bom_length = 1 if source.startswith("\ufeff") else 0
+    token_source = source[bom_length:]
+    token_input = (
+        token_source.replace("\r", "\n")
+        if "\n" not in token_source and "\r" in token_source
+        else token_source
+    )
+    lines = token_source.splitlines(keepends=True)
+    offsets: list[int] = []
+    offset = 0
+    for line in lines:
+        offsets.append(offset)
+        offset += len(line)
+
+    spans: list[tuple[int, int]] = []
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(token_input).readline)
+        for token_info in tokens:
+            row, column = token_info.start
+            if token_info.type != tokenize.COMMENT or column != 0:
+                continue
+            if token_info.string != marker:
+                continue
+            start = bom_length + offsets[row - 1]
+            spans.append((start, start + len(marker)))
+    except tokenize.TokenError:
+        pass
+    return tuple(spans)
+
+
+def _managed_block_bounds(source: str, *, python_source: bool = True) -> tuple[int, int] | None:
+    finder = _marker_spans if python_source else _physical_marker_spans
+    begins = finder(source, BEGIN_MARKER)
+    ends = finder(source, END_MARKER)
+    if not begins and not ends:
+        return None
+    if len(begins) != 1 or len(ends) != 1:
+        raise ConfigError("managed Rime configuration markers are unbalanced or duplicated")
+    begin = begins[0][0]
+    end_marker_start, end = ends[0]
+    if end_marker_start < begin:
+        raise ConfigError("managed Rime configuration end marker precedes its begin marker")
+    return begin, end
+
+
+def _physical_line_number(source: str, offset: int) -> int:
+    prefix = source[:offset]
+    newline_count = prefix.count("\n") + prefix.count("\r") - prefix.count("\r\n")
+    return newline_count + 1
+
+
 def _find_call(
     source: str,
     function: str,
@@ -134,12 +215,12 @@ def _find_call(
         ):
             nested_lines.append(node.lineno)
     if nested_lines:
-        raise ConfigError(
-            f"{function}() must be a top-level statement (line {nested_lines[0]})"
-        )
+        raise ConfigError(f"{function}() must be a top-level statement (line {nested_lines[0]})")
     if len(top_level) > 1:
         raise ConfigError(f"multiple {function}() declarations are not allowed")
     if not top_level:
+        if _marker_spans(source, BEGIN_MARKER) or _marker_spans(source, END_MARKER):
+            extract_managed_block(source)
         if required:
             raise ConfigError(f"{function}() declaration is missing")
         return None
@@ -147,8 +228,12 @@ def _find_call(
     managed = extract_managed_block(source)
     if managed is None:
         raise ConfigError(f"{function}() must be inside a managed configuration block")
-    begin_line = source[: source.index(BEGIN_MARKER)].count("\n") + 1
-    end_line = source[: source.index(END_MARKER)].count("\n") + 1
+    bounds = _managed_block_bounds(source)
+    assert bounds is not None
+    begin, end = bounds
+    begin_line = _physical_line_number(source, begin)
+    end_marker_start = end - len(END_MARKER)
+    end_line = _physical_line_number(source, end_marker_start)
     call_end_line = call.end_lineno if call.end_lineno is not None else call.lineno
     if call.lineno <= begin_line or call_end_line >= end_line:
         raise ConfigError(f"{function}() must be inside a managed configuration block")
@@ -178,6 +263,14 @@ def contains_declaration(source: str, function: str) -> bool:
         isinstance(node, ast.Call) and _function_name(node) == function
         for node in ast.walk(_parse_tree(source))
     )
+
+
+def is_managed_configuration(source: str, function: str) -> bool:
+    """Classify dedicated configs while preserving ordinary Rime targets."""
+
+    if _marker_spans(source, BEGIN_MARKER) or _marker_spans(source, END_MARKER):
+        return True
+    return contains_declaration(source, function)
 
 
 _ModelT = TypeVar("_ModelT")
@@ -292,11 +385,7 @@ def render_project_block(config: ProjectConfig) -> str:
         "yukicoder_project",
         [("base_url", config.base_url), ("rime_out_dir", config.rime_out_dir)],
     )
-    body = (
-        "from yukitools_rime.rime_plugin import install, yukicoder_project\n\n"
-        "install()\n"
-        f"{call}"
-    )
+    body = f"from yukitools_rime.rime_plugin import install, yukicoder_project\n\ninstall()\n{call}"
     return _managed(body)
 
 
@@ -383,29 +472,31 @@ def render_solution_block(config: SolutionConfig) -> str:
 def extract_managed_block(source: str) -> str | None:
     """Return a complete managed block, or None when it is absent."""
 
-    begin_count = source.count(BEGIN_MARKER)
-    end_count = source.count(END_MARKER)
-    if begin_count == end_count == 0:
+    bounds = _managed_block_bounds(source)
+    if bounds is None:
         return None
-    if begin_count != 1 or end_count != 1:
-        raise ConfigError("managed Rime configuration markers are unbalanced or duplicated")
-    begin = source.index(BEGIN_MARKER)
-    end_marker = source.index(END_MARKER)
-    if end_marker < begin:
-        raise ConfigError("managed Rime configuration end marker precedes its begin marker")
-    end = end_marker + len(END_MARKER)
+    begin, end = bounds
     return source[begin:end]
 
 
-def upsert_managed_block(source: str, rendered_block: str) -> str:
+def upsert_managed_block(
+    source: str,
+    rendered_block: str,
+    *,
+    python_source: bool = True,
+) -> str:
     """Insert or replace a managed block while preserving surrounding content."""
 
-    newline = "\r\n" if "\r\n" in source else "\n"
+    if "\r\n" in source:
+        newline = "\r\n"
+    elif "\r" in source and "\n" not in source:
+        newline = "\r"
+    else:
+        newline = "\n"
     normalized = rendered_block.replace("\r\n", "\n").strip("\n").replace("\n", newline)
-    old = extract_managed_block(source)
-    if old is not None:
-        start = source.index(BEGIN_MARKER)
-        end = source.index(END_MARKER, start) + len(END_MARKER)
+    bounds = _managed_block_bounds(source, python_source=python_source)
+    if bounds is not None:
+        start, end = bounds
         return f"{source[:start]}{normalized}{source[end:]}"
     if not source:
         return f"{normalized}{newline}"
@@ -420,11 +511,10 @@ def upsert_managed_block(source: str, rendered_block: str) -> str:
 def upsert_managed_block_at_end(source: str, rendered_block: str) -> str:
     """Update a managed block and keep it after all unmanaged configuration."""
 
-    old = extract_managed_block(source)
-    if old is None:
+    bounds = _managed_block_bounds(source)
+    if bounds is None:
         return upsert_managed_block(source, rendered_block)
-    start = source.index(BEGIN_MARKER)
-    end = source.index(END_MARKER, start) + len(END_MARKER)
+    start, end = bounds
     suffix = source[end:]
     if not suffix.strip():
         return upsert_managed_block(source, rendered_block)
