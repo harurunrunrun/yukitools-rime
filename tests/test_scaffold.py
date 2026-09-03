@@ -119,8 +119,8 @@ def test_init_creates_idempotent_project_without_git_or_api(tmp_path: Path) -> N
     assert not (root / ".git").exists()
     assert parse_project_config((root / "PROJECT").read_text()).base_url.endswith("/api")
     ignore = (root / ".gitignore").read_text()
-    assert ".env\n" in ignore
-    assert "rime-out/\n" in ignore
+    assert "/.env\n" in ignore
+    assert "/*/rime-out/\n" in ignore
     assert (root / ".env.example").is_file()
 
     snapshot = {
@@ -299,6 +299,36 @@ def test_new_problem_rejects_non_child_directory_names(tmp_path: Path, name: str
     assert not called
 
 
+@pytest.mark.parametrize("name", [".env", ".ENV"])
+def test_new_problem_rejects_reserved_credential_directory(tmp_path: Path, name: str) -> None:
+    root = tmp_path / "project"
+    init_project(root)
+    called = False
+
+    def factory(root: Path, config: ProjectConfig, problem_id: int) -> FakeClient:
+        nonlocal called
+        called = True
+        return FakeClient()
+
+    with pytest.raises(ValidationError, match="reserved"):
+        new_problem(42, root, dir_name=name, client_factory=factory)
+    assert not called
+
+
+@pytest.mark.parametrize("name", [".env", ".ENV"])
+def test_init_rejects_existing_reserved_credential_problem(tmp_path: Path, name: str) -> None:
+    root = tmp_path / "project"
+    problem = root / name
+    problem.mkdir(parents=True)
+    (problem / "PROBLEM").write_text("problem(lambda: None)\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="reserved"):
+        init_project(root)
+
+    assert not (root / ".gitignore").exists()
+    assert not (root / ".env.example").exists()
+
+
 def test_new_problem_rejects_existing_directory_and_duplicate_id(tmp_path: Path) -> None:
     root = tmp_path / "project"
     init_project(root)
@@ -385,3 +415,27 @@ def test_init_ignore_rules_hide_credentials_and_generated_cases_from_git(
     ).stdout
 
     assert current == baseline
+
+    nested_source = root / "a" / "tests" / ".env"
+    nested_source.parent.mkdir(exist_ok=True)
+    nested_source.write_text("ordinary source\n", encoding="utf-8")
+    output_named_problem = root / "rime-out" / "PROBLEM"
+    output_named_problem.parent.mkdir()
+    output_named_problem.write_text("ordinary problem\n", encoding="utf-8")
+
+    assert (
+        subprocess.run(
+            ["git", "check-ignore", "-q", str(nested_source.relative_to(root))],
+            cwd=root,
+            check=False,
+        ).returncode
+        == 1
+    )
+    assert (
+        subprocess.run(
+            ["git", "check-ignore", "-q", str(output_named_problem.relative_to(root))],
+            cwd=root,
+            check=False,
+        ).returncode
+        == 1
+    )

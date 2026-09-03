@@ -57,6 +57,8 @@ from yukitools_rime.testcase_sync import (
     replace_local_snapshot,
 )
 
+_RESERVED_PROBLEM_DIRECTORY_NAMES = {".env"}
+
 _ENV_EXAMPLE = """# Copy this file to .env and add one or more credentials.
 # Never commit real tokens.
 #
@@ -73,7 +75,7 @@ _ENV_EXAMPLE = """# Copy this file to .env and add one or more credentials.
 
 
 def _gitignore_block(config: ProjectConfig) -> str:
-    return f"{BEGIN_MARKER}\n.env\n{config.rime_out_dir}/\n{END_MARKER}\n"
+    return f"{BEGIN_MARKER}\n/.env\n/*/{config.rime_out_dir}/\n{END_MARKER}\n"
 
 
 class ScaffoldClient(Protocol):
@@ -133,6 +135,10 @@ def _validate_existing_output_directories(
             continue
         if not problem_file.is_file() or problem_file.is_symlink():
             continue
+        if child.name.casefold() in _RESERVED_PROBLEM_DIRECTORY_NAMES:
+            raise ConfigError(
+                f"Rime problem directory name is reserved by yukitools-rime: {child.name}"
+            )
         output = child / project_config.rime_out_dir
         if output.is_symlink() or (output.exists() and not output.is_dir()):
             raise ConfigError(f"unsafe Rime output path: {output}")
@@ -368,6 +374,10 @@ def new_problem(
             f"{project.config.rime_out_dir}"
         )
     directory_name = str(problem_id) if dir_name is None else dir_name
+    if directory_name.casefold() in _RESERVED_PROBLEM_DIRECTORY_NAMES:
+        raise ValidationError(
+            f"problem directory name is reserved by yukitools-rime: {directory_name}"
+        )
     target = safe_child(project.root, directory_name, label="problem directory")
     if target.exists() or target.is_symlink():
         raise ConflictError(f"problem directory already exists: {target}")
