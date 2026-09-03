@@ -26,12 +26,11 @@ def streams(value: str = "", *, tty: bool = False) -> tuple[Input, io.StringIO, 
     return Input(value, tty=tty), io.StringIO(), io.StringIO()
 
 
-def test_empty_command_prints_help() -> None:
+def test_empty_command_is_an_argument_error() -> None:
     stdin, stdout, stderr = streams()
-    assert cli.main([], stdin=stdin, stdout=stdout, stderr=stderr) == 0
-    assert "init" in stdout.getvalue()
-    assert "languages" in stdout.getvalue()
-    assert stderr.getvalue() == ""
+    with pytest.raises(SystemExit) as caught:
+        cli.main([], stdin=stdin, stdout=stdout, stderr=stderr)
+    assert caught.value.code == 2
 
 
 def test_parser_exposes_exact_commands_and_options() -> None:
@@ -281,6 +280,27 @@ def test_submit_and_expected_solution_dispatch(
         == 0
     )
     assert "解除" in stdout.getvalue()
+
+
+def test_submit_reports_success_when_response_has_no_submission_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "resolve_target", lambda target: object())
+    monkeypatch.setattr(
+        cli,
+        "submit_solution",
+        lambda *args: SimpleNamespace(
+            problem_id=1,
+            submission_id=None,
+            raw_response='{"accepted":true}',
+        ),
+    )
+    stdin, stdout, stderr = streams()
+    assert cli.main(["submit"], stdin=stdin, stdout=stdout, stderr=stderr) == 0
+    assert "提出しました: 問題 1" in stdout.getvalue()
+    assert 'サーバーレスポンス: {"accepted":true}' in stdout.getvalue()
+    assert "提出ID" not in stdout.getvalue()
+    assert stderr.getvalue() == ""
 
 
 def test_expected_errors_and_interrupt_have_stable_codes(

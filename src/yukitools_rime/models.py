@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum, StrEnum
 from pathlib import PurePath
 from typing import Any, TypeAlias, cast
+from urllib.parse import urlsplit
 
 from yukitools_rime.errors import ValidationError
 
@@ -186,9 +187,19 @@ class ProjectConfig:
     rime_out_dir: str = DEFAULT_RIME_OUT_DIR
 
     def __post_init__(self) -> None:
-        self.base_url = _string(self.base_url, label="base_url", empty=False).rstrip("/")
-        if not self.base_url.startswith(("https://", "http://")):
+        base_url = _string(self.base_url, label="base_url", empty=False).rstrip("/")
+        try:
+            parsed = urlsplit(base_url)
+            _port = parsed.port
+        except ValueError as exc:
+            raise ValidationError("base_url must be a valid URL") from exc
+        if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
             raise ValidationError("base_url must be an http:// or https:// URL")
+        if parsed.query or parsed.fragment:
+            raise ValidationError("base_url must not contain a query or fragment")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValidationError("base_url must not contain user credentials")
+        self.base_url = base_url
         self.rime_out_dir = validate_basename(self.rime_out_dir, label="rime_out_dir")
         if self.rime_out_dir.startswith("."):
             raise ValidationError("rime_out_dir must not be hidden")

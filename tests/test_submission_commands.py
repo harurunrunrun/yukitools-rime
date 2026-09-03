@@ -120,6 +120,20 @@ def test_submit_uses_managed_solution_owner_config_and_normalized_source(
     assert created == [owner]
 
 
+def test_submit_does_not_turn_an_unrecognized_success_response_into_a_retryable_error(
+    tmp_path: Path,
+) -> None:
+    selected, _ = selection(tmp_path)
+    fake = FakeSubmission('{"accepted":true}')
+
+    result = submit_solution(selected, fake)
+
+    assert result.problem_id == 42
+    assert result.submission_id is None
+    assert result.raw_response == '{"accepted":true}'
+    assert fake.submits == [(42, "py", "print(1)\n")]
+
+
 def test_submit_requires_explicit_managed_solution(tmp_path: Path) -> None:
     selected, _ = selection(tmp_path, select_solution=False)
     with pytest.raises(LayoutError, match="SOLUTION"):

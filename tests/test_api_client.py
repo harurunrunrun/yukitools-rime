@@ -9,11 +9,14 @@ import pytest
 from yukitools_rime.api import (
     GeneratorRequest,
     JudgeCodeRequest,
+    ProblemEditRequest,
+    ResponseFormatError,
     SolutionRequest,
     YukicoderClient,
     YukicoderHTTPError,
+    YukicoderTransportError,
 )
-from yukitools_rime.models import Which
+from yukitools_rime.models import ProblemSettings, Statement, Which
 
 
 def test_all_routes_use_the_documented_methods_and_paths() -> None:
@@ -204,3 +207,122 @@ def test_response_gzip_is_decoded_by_httpx() -> None:
     )
     with YukicoderClient("t", "https://example.test/api", transport=transport) as client:
         assert client.get_testcase(1, "out", "x.txt") == b"raw testcase\n"
+
+
+def test_problem_get_and_save_use_edit_route_and_exclude_read_only_fields() -> None:
+    requests: list[httpx.Request] = []
+    remote = {
+        "problemId": 7,
+        "title": "remote",
+        "tags": "tag",
+        "level": 2.0,
+        "timeLimitMs": 2000,
+        "memoryLimit": 512,
+        "epsMode": "-",
+        "eps": "0",
+        "wip": True,
+        "recruitingTester": False,
+        "problemType": 0,
+        "judgeType": 0,
+        "showAns": False,
+        "enablePureJudge": False,
+        "forceSingleServerJudge": False,
+        "allowedLangs": [],
+        "content": "remote body",
+        "isMarkdown": True,
+        "showable": False,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json=remote)
+        body = json.loads(request.content)
+        assert body["title"] == "local"
+        assert body["markdown"] == "# local\n"
+        assert body["html"] == ""
+        assert not {"problemId", "content", "isMarkdown", "showable"} & body.keys()
+        return httpx.Response(200, json={"Message": "saved"})
+
+    settings = ProblemSettings(
+        title="local",
+        tags="tag",
+        level=2.0,
+        time_limit_ms=2000,
+        memory_limit=512,
+        eps_mode="-",
+        eps="0",
+        wip=True,
+        recruiting_tester=False,
+        problem_type=0,
+        judge_type=0,
+        show_ans=False,
+        enable_pure_judge=False,
+        force_single_server_judge=False,
+        allowed_langs=(),
+    )
+    transport = httpx.MockTransport(handler)
+    with YukicoderClient("token", "https://example.test/api", transport=transport) as client:
+        assert client.get_problem_edit(7).problem_id == 7
+        result = client.save_problem_edit(
+            7, ProblemEditRequest(settings, Statement.markdown("# local\n"))
+        )
+
+    assert result.message == "saved"
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/problems/7/edit"),
+        ("PUT", "/api/v1/problems/7/edit"),
+    ]
+    assert all(request.headers["authorization"] == "Bearer token" for request in requests)
+
+
+@pytest.mark.parametrize("status_code", [401, 404, 500])
+def test_problem_http_errors_do_not_retry(status_code: int) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status_code, text="request failed")
+
+    transport = httpx.MockTransport(handler)
+    with YukicoderClient(
+        "token", "https://example.test/api", transport=transport
+    ) as client, pytest.raises(YukicoderHTTPError) as caught:
+        client.get_problem_edit(7)
+
+    assert caught.value.status_code == status_code
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", "/api/v1/problems/7/edit")
+    ]
+
+
+def test_success_with_invalid_json_raises_response_format_error() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"not json")
+
+    transport = httpx.MockTransport(handler)
+    with YukicoderClient(
+        "token", "https://example.test/api", transport=transport
+    ) as client, pytest.raises(ResponseFormatError):
+        client.get_problem_edit(7)
+
+    assert len(requests) == 1
+
+
+def test_transport_error_is_wrapped_without_retry() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise httpx.ConnectError("connection failed", request=request)
+
+    transport = httpx.MockTransport(handler)
+    with YukicoderClient(
+        "token", "https://example.test/api", transport=transport
+    ) as client, pytest.raises(YukicoderTransportError):
+        client.get_problem_edit(7)
+
+    assert len(requests) == 1

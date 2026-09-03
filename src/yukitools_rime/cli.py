@@ -61,7 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
     )
-    commands = parser.add_subparsers(dest="command", metavar="COMMAND")
+    commands = parser.add_subparsers(
+        dest="command", metavar="COMMAND", required=True
+    )
 
     command = commands.add_parser("init", help="Rimeプロジェクトを初期化する")
     command.add_argument("project", nargs="?", default=".", metavar="PROJECT")
@@ -309,11 +311,17 @@ def _dispatch(
                 resolve_target(args.solution),
                 cast(SubmissionClientFactory, problem_factory),
             )
-            _line(
-                stdout,
-                f"提出しました: 問題 {submit_result.problem_id}, "
-                f"提出ID {submit_result.submission_id}",
-            )
+            if submit_result.submission_id is None:
+                _line(stdout, f"提出しました: 問題 {submit_result.problem_id}")
+                response = submit_result.raw_response.strip()
+                if response:
+                    _line(stdout, f"サーバーレスポンス: {response}")
+            else:
+                _line(
+                    stdout,
+                    f"提出しました: 問題 {submit_result.problem_id}, "
+                    f"提出ID {submit_result.submission_id}",
+                )
             return 0
 
         if args.command == "solution":

@@ -27,7 +27,7 @@ SubmissionClientFactory = Callable[[ProblemLayout], SubmissionAPI]
 @dataclass(frozen=True, slots=True)
 class SubmissionResult:
     problem_id: int
-    submission_id: int
+    submission_id: int | None
     solution_path: Path
     source_path: Path
     lang_id: str
@@ -139,7 +139,10 @@ def submit_solution(
         solution.config.lang_id,
         source,
     )
-    submission_id = parse_submission_id(raw_response)
+    try:
+        submission_id = parse_submission_id(raw_response)
+    except SubmissionResponseError:
+        submission_id = None
     return SubmissionResult(
         problem_id=problem.problem_id,
         submission_id=submission_id,

@@ -106,3 +106,20 @@ def test_project_and_enums() -> None:
     assert ProjectConfig(base_url="https://example.test/api/").base_url.endswith("/api")
     assert str(Which.OUT) == "out"
     assert judge_status_is_final("AC") and not judge_status_is_final("Judge")
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://example.test/api?token=secret",
+        "https://example.test/api#section",
+        "https://user@example.test/api",
+        "https://user:password@example.test/api",
+        "https://example.test:not-a-port/api",
+        "https://example.test:99999/api",
+        "https://[::1/api",
+    ],
+)
+def test_project_rejects_unsafe_or_malformed_base_urls(base_url: str) -> None:
+    with pytest.raises(ValidationError, match="base_url"):
+        ProjectConfig(base_url=base_url)
