@@ -138,12 +138,8 @@ def compare_snapshots(
     )
 
 
-def _is_case_file(path: Path) -> bool:
-    return (
-        not path.is_symlink()
-        and path.is_file()
-        and (path.name.endswith(".in") or path.name.endswith(".diff"))
-    )
+def _is_case_path(path: Path) -> bool:
+    return path.name.endswith(".in") or path.name.endswith(".diff")
 
 
 def _validated_snapshot(snapshot: Mapping[str, TestCaseData]) -> TestcaseSnapshot:
@@ -190,8 +186,12 @@ def replace_local_snapshot(
             stage.rmdir()
             shutil.copytree(target, stage, symlinks=True)
         for entry in stage.iterdir():
-            if _is_case_file(entry):
-                entry.unlink()
+            if not _is_case_path(entry):
+                continue
+            if entry.is_dir() and not entry.is_symlink():
+                # Directories are artifacts even when their name has a case suffix.
+                continue
+            entry.unlink()
         for name, case in cases.items():
             input_path, output_path = local_testcase_paths(stage, name)
             atomic_write_bytes(input_path, case.input, create_parents=False)
@@ -329,7 +329,16 @@ def push_testcases(
         client.delete_testcase(problem_id, Which.OUT, name)
 
     normalized = fetch_remote_snapshot(client, problem_id)
-    replace_local_snapshot(target, normalized)
+    missing = set(local) - set(normalized)
+    if missing:
+        raise ValidationError(
+            "server normalization response omitted local testcases: "
+            + ", ".join(sorted(missing))
+        )
+    replace_local_snapshot(
+        target,
+        {name: normalized[name] for name in local},
+    )
     return PushResult(
         normalized,
         uploaded_inputs=len(input_uploads),

@@ -115,6 +115,8 @@ class FakeClient:
     save_judge_status: str = "AC"
     poll_statuses: list[str] = field(default_factory=list)
     normalize_uploads: bool = False
+    upload_warning: str = ""
+    reported_file_names: tuple[str, ...] | None = None
     calls: list[str] = field(default_factory=list)
     problem_requests: list[ProblemEditRequest] = field(default_factory=list)
     generator_requests: list[GeneratorRequest] = field(default_factory=list)
@@ -241,7 +243,12 @@ class FakeClient:
         for name, content in files.items():
             normalized = content + b"|server" if self.normalize_uploads else content
             self.cases[(value, name)] = normalized
-        return UploadResponse(tuple(files), "")
+        reported = (
+            tuple(files)
+            if self.reported_file_names is None
+            else self.reported_file_names
+        )
+        return UploadResponse(reported, self.upload_warning)
 
     def delete_testcase(self, problem_id: int, which: Which | str, name: str) -> None:
         value = side(which)
@@ -376,6 +383,32 @@ def test_empty_or_incomplete_local_testcases_stop_before_api(
     assert not called
 
 
+def test_testcase_output_symlink_escape_stops_before_api(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    project = make_project(project_root)
+    outside = tmp_path / "outside"
+    testcase_dir = outside / "tests"
+    testcase_dir.mkdir(parents=True)
+    (testcase_dir / "sample.in").write_bytes(b"input")
+    (testcase_dir / "sample.diff").write_bytes(b"output")
+    (project.problems[0].path / "generated").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+    called = False
+
+    def make_client(problem: ProblemLayout) -> FakeClient:
+        nonlocal called
+        called = True
+        return FakeClient()
+
+    with pytest.raises(LayoutError, match="escapes problem root"):
+        push(project, make_client, include_testcases=True)
+
+    assert not called
+
+
 def test_testcases_upload_prune_and_refresh_server_normalization(
     tmp_path: Path,
 ) -> None:
@@ -415,6 +448,60 @@ def test_testcases_upload_prune_and_refresh_server_normalization(
     assert local["added"].output == b"added-output|server"
     assert result.completed_items[-1].endswith("normalization refresh")
     assert sleeps == [1.25]
+
+
+def test_normalization_refresh_does_not_import_remote_only_cases_without_prune(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    problem = project.problems[0]
+    directory = write_case(problem, "local", b"new-input", b"new-output")
+    client = FakeClient(
+        cases={
+            ("in", "local"): b"old-input",
+            ("out", "local"): b"new-output",
+            ("in", "remote_only"): b"remote-input",
+            ("out", "remote_only"): b"remote-output",
+        }
+    )
+
+    push(
+        project,
+        factory({1: client}),
+        include_testcases=True,
+        testcase_refresh_delay=0,
+    )
+
+    local = read_testcases(directory)
+    assert set(local) == {"local"}
+    assert client.cases[("in", "remote_only")] == b"remote-input"
+    assert client.cases[("out", "remote_only")] == b"remote-output"
+
+
+def test_upload_response_warnings_and_changed_filenames_are_reported(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    write_case(project.problems[0], "sample", b"input", b"output")
+    client = FakeClient(
+        cases={},
+        upload_warning="server normalized the upload",
+        reported_file_names=("renamed",),
+    )
+
+    result = push(
+        project,
+        factory({1: client}),
+        include_testcases=True,
+        testcase_refresh_delay=0,
+    )
+
+    assert sum(
+        "server normalized the upload" in warning for warning in result.warnings
+    ) == 2
+    assert sum(
+        "server reported different file names" in warning for warning in result.warnings
+    ) == 2
 
 
 def test_empty_program_sources_explicitly_delete_remote_programs(tmp_path: Path) -> None:

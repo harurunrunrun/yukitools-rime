@@ -226,6 +226,51 @@ def test_pull_updates_resources_and_preserves_local_only_fields(tmp_path: Path) 
     assert remote.calls == ["edit", "generator", "judge", "editorial"]
 
 
+def test_pull_preserves_bom_crlf_and_unmanaged_problem_and_testset_text(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    problem_path = project.problems[0].path
+    problem_config = ProblemConfig(
+        1,
+        settings(),
+        "A",
+        "answer",
+        {"local_option": True},
+    )
+    testset_config = rime_config.TestsetConfig(
+        GeneratorConfig("cpp17", "custom-generator.cpp", 2, "case", "cxx"),
+        JudgeConfig("cpp17", "custom-judge.cpp", "cxx"),
+    )
+    problem_source = (
+        "\ufeff# problem header\r\n"
+        + render_problem_block(problem_config).replace("\n", "\r\n")
+        + "# problem footer\r\n"
+    )
+    testset_source = (
+        "\ufeff# testset header\r\n"
+        + render_testset_block(testset_config).replace("\n", "\r\n")
+        + "# testset footer\r\n"
+    )
+    (problem_path / "PROBLEM").write_bytes(problem_source.encode("utf-8"))
+    (problem_path / "tests" / "TESTSET").write_bytes(testset_source.encode("utf-8"))
+    project = load_project(tmp_path)
+    remote = client(
+        generator=GeneratorContent("cpp20", "new generator\n", True, 8)
+    )
+
+    sync.pull(project, factory(remote))
+
+    for path, header, footer in (
+        (problem_path / "PROBLEM", b"# problem header", b"# problem footer\r\n"),
+        (problem_path / "tests" / "TESTSET", b"# testset header", b"# testset footer\r\n"),
+    ):
+        contents = path.read_bytes()
+        assert contents.startswith(b"\xef\xbb\xbf" + header + b"\r\n")
+        assert contents.endswith(footer)
+        assert b"\n" not in contents[3:].replace(b"\r\n", b"")
+
+
 def test_pull_does_not_create_missing_editorial_and_infers_new_program(
     tmp_path: Path,
 ) -> None:
@@ -391,3 +436,43 @@ def test_pull_rolls_back_regular_files_when_testcase_swap_fails(
             confirm=lambda problem, changes: True,
         )
     assert file_snapshot(tmp_path) == before
+
+
+def test_pull_rollback_removes_directories_created_before_testcase_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "PROJECT").write_text(
+        render_project_block(ProjectConfig(rime_out_dir="generated")),
+        encoding="utf-8",
+    )
+    problem_path = tmp_path / "a"
+    problem_path.mkdir()
+    (problem_path / "PROBLEM").write_text(
+        render_problem_block(ProblemConfig(1, settings(), "A")),
+        encoding="utf-8",
+    )
+    (problem_path / "statement.md").write_text("old statement\n", encoding="utf-8")
+    project = load_project(tmp_path)
+    before = file_snapshot(tmp_path)
+    remote = client(
+        generator=GeneratorContent("cpp20", "new generator\n", True, 2),
+        cases={
+            ("in", "new"): b"input",
+            ("out", "new"): b"output",
+        },
+    )
+
+    def fail(directory: Path, snapshot: Any) -> None:
+        raise OSError("swap failed")
+
+    monkeypatch.setattr(sync, "replace_local_snapshot", fail)
+    with pytest.raises(OSError, match="swap failed"):
+        sync.pull(
+            project,
+            factory(remote),
+            include_testcases=True,
+        )
+
+    assert file_snapshot(tmp_path) == before
+    assert not (problem_path / "tests").exists()

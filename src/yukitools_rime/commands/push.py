@@ -20,6 +20,7 @@ from yukitools_rime.api.types import (
     JudgeCodeSaveResponse,
     ProblemEditContent,
     ProblemEditRequest,
+    UploadResponse,
 )
 from yukitools_rime.errors import APIError, LayoutError, UsageError, ValidationError
 from yukitools_rime.files import normalize_text, read_text, require_regular_file
@@ -607,18 +608,38 @@ def _execute_plan(
     if testcases is not None and testcases.has_writes:
         for batch in testcases.input_batches:
             label = f"{prefix} testcase inputs [{', '.join(batch)}]"
-            _perform(
+            upload_response = _perform(
                 label,
                 completed,
                 partial(plan.client.upload_testcases, problem_id, Which.IN, batch),
             )
+            if isinstance(upload_response, UploadResponse):
+                warning = upload_response.warning.strip()
+                if warning:
+                    warnings.append(f"{label}: {warning}")
+                reported_names = set(upload_response.file_names)
+                if upload_response.file_names and reported_names != set(batch):
+                    warnings.append(
+                        f"{label}: server reported different file names "
+                        f"({', '.join(upload_response.file_names)})"
+                    )
         for batch in testcases.output_batches:
             label = f"{prefix} testcase outputs [{', '.join(batch)}]"
-            _perform(
+            upload_response = _perform(
                 label,
                 completed,
                 partial(plan.client.upload_testcases, problem_id, Which.OUT, batch),
             )
+            if isinstance(upload_response, UploadResponse):
+                warning = upload_response.warning.strip()
+                if warning:
+                    warnings.append(f"{label}: {warning}")
+                reported_names = set(upload_response.file_names)
+                if upload_response.file_names and reported_names != set(batch):
+                    warnings.append(
+                        f"{label}: server reported different file names "
+                        f"({', '.join(upload_response.file_names)})"
+                    )
         for name in testcases.stale:
             _perform(
                 f"{prefix} delete testcase input {name}",
@@ -635,7 +656,16 @@ def _execute_plan(
             if testcase_refresh_delay:
                 sleep(testcase_refresh_delay)
             normalized = fetch_remote_snapshot(plan.client, problem_id)
-            replace_local_snapshot(testcases.directory, normalized)
+            missing = set(testcases.local) - set(normalized)
+            if missing:
+                raise ValidationError(
+                    "server normalization response omitted local testcases: "
+                    + ", ".join(sorted(missing))
+                )
+            replace_local_snapshot(
+                testcases.directory,
+                {name: normalized[name] for name in testcases.local},
+            )
 
         _perform(
             f"{prefix} testcase normalization refresh",

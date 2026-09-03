@@ -40,6 +40,7 @@ from yukitools_rime.rime_config import (
     merge_remote_problem,
     parse_problem_config,
     parse_testset_config,
+    read_config_source,
     render_problem_block,
     render_testset_block,
     upsert_managed_block,
@@ -315,7 +316,7 @@ def _testset_state(problem: ProblemLayout) -> tuple[Path, str, TestsetConfig]:
         path = problem.path / "tests"
         return path, "", TestsetConfig()
     path = problem.testset.path
-    source = read_text(path / "TESTSET")
+    source = read_config_source(path / "TESTSET")
     return path, source, parse_testset_config(source)
 
 
@@ -356,7 +357,7 @@ def _build_pull_plan(
     mutations: list[_Mutation] = []
     warnings: list[str] = []
 
-    problem_source = read_text(problem.config_path)
+    problem_source = read_config_source(problem.config_path)
     local_problem = parse_problem_config(problem_source)
     remote_problem = ProblemConfig(
         problem_id=remote.edit.problem_id,
@@ -471,7 +472,10 @@ def _build_pull_plan(
     )
 
 
-def _restore_mutations(backups: list[tuple[Path, bytes | None]]) -> Exception | None:
+def _restore_mutations(
+    backups: list[tuple[Path, bytes | None]],
+    created_dirs: tuple[Path, ...] = (),
+) -> Exception | None:
     rollback_error: Exception | None = None
     for path, previous in reversed(backups):
         try:
@@ -481,13 +485,35 @@ def _restore_mutations(backups: list[tuple[Path, bytes | None]]) -> Exception | 
                 atomic_write_bytes(path, previous)
         except Exception as exc:  # pragma: no cover - catastrophic filesystem failure
             rollback_error = rollback_error or exc
+    for directory in sorted(
+        created_dirs, key=lambda path: len(path.parts), reverse=True
+    ):
+        try:
+            directory.rmdir()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:  # pragma: no cover - concurrent filesystem mutation
+            rollback_error = rollback_error or exc
     return rollback_error
+
+
+def _missing_parent_dirs(mutations: tuple[_Mutation, ...]) -> tuple[Path, ...]:
+    missing: set[Path] = set()
+    for mutation in mutations:
+        if mutation.data is None:
+            continue
+        directory = mutation.path.parent
+        while not directory.exists():
+            missing.add(directory)
+            directory = directory.parent
+    return tuple(missing)
 
 
 def _apply_mutations(
     mutations: tuple[_Mutation, ...],
-) -> list[tuple[Path, bytes | None]]:
+) -> tuple[list[tuple[Path, bytes | None]], tuple[Path, ...]]:
     backups: list[tuple[Path, bytes | None]] = []
+    created_dirs = _missing_parent_dirs(mutations)
     try:
         for mutation in mutations:
             existed = mutation.path.exists() or mutation.path.is_symlink()
@@ -498,13 +524,13 @@ def _apply_mutations(
             else:
                 atomic_write_bytes(mutation.path, mutation.data)
     except Exception as error:
-        rollback_error = _restore_mutations(backups)
+        rollback_error = _restore_mutations(backups, created_dirs)
         if rollback_error is not None:
             raise FileOperationError(
                 f"pull failed and rollback also failed: {rollback_error}"
             ) from error
         raise
-    return backups
+    return backups, created_dirs
 
 
 def pull(
@@ -525,14 +551,14 @@ def pull(
     )
     results: list[PullProblemResult] = []
     for plan in plans:
-        backups = _apply_mutations(plan.mutations)
+        backups, created_dirs = _apply_mutations(plan.mutations)
         if plan.apply_testcases:
             assert plan.testcase_dir is not None
             assert plan.remote.testcases is not None
             try:
                 replace_local_snapshot(plan.testcase_dir, plan.remote.testcases)
             except Exception as error:
-                rollback_error = _restore_mutations(backups)
+                rollback_error = _restore_mutations(backups, created_dirs)
                 if rollback_error is not None:
                     raise FileOperationError(
                         "testcase replacement failed and regular-file rollback "
@@ -609,7 +635,7 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
     problem = remote.problem
     entries: list[DiffEntry] = []
     warnings: list[str] = []
-    local_problem = parse_problem_config(read_text(problem.config_path))
+    local_problem = parse_problem_config(read_config_source(problem.config_path))
     for field in fields(remote.edit.settings):
         name = field.name
         remote_value = getattr(remote.edit.settings, name)

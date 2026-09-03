@@ -210,7 +210,7 @@ def test_push_uploads_prunes_and_refetches_normalized_bytes(tmp_path: Path) -> N
     assert api.list_calls == 4
 
 
-def test_push_without_prune_refreshes_remote_only_case(tmp_path: Path) -> None:
+def test_push_without_prune_does_not_import_remote_only_case(tmp_path: Path) -> None:
     target = tmp_path / "cases"
     write_case(target, case("local"))
     api = FakeAPI(
@@ -219,4 +219,21 @@ def test_push_without_prune_refreshes_remote_only_case(tmp_path: Path) -> None:
     )
     result = push_testcases(api, 42, target)
     assert result.pruned == 0
-    assert (target / "remote.in").read_bytes() == b"ri"
+    assert not (target / "remote.in").exists()
+
+
+def test_replace_unlinks_case_symlink_without_touching_its_target(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret"
+    secret.write_bytes(b"keep")
+    target = tmp_path / "cases"
+    target.mkdir()
+    (target / "old.in").symlink_to(secret)
+
+    replace_local_snapshot(target, {"new": case("new")})
+
+    assert secret.read_bytes() == b"keep"
+    assert not (target / "old.in").exists()
