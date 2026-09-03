@@ -274,3 +274,19 @@ def test_testcase_component_output_must_not_be_a_symlink(tmp_path: Path) -> None
     problem = load_project(tmp_path).problems[0]
     with pytest.raises(LayoutError, match="symlink"):
         problem.testcase_dir(ProjectConfig())
+
+
+def test_testcase_component_output_must_be_a_directory(tmp_path: Path) -> None:
+    (tmp_path / "PROJECT").write_text(render_project_block(ProjectConfig()), encoding="utf-8")
+    problem_path = make_problem(tmp_path, "a", 1)
+    tests = problem_path / "tests"
+    tests.mkdir()
+    (tests / "TESTSET").write_text("", encoding="utf-8")
+    output = problem_path / "rime-out"
+    output.mkdir()
+    (output / "tests").write_bytes(b"not a directory")
+
+    problem = load_project(tmp_path).problems[0]
+
+    with pytest.raises(LayoutError, match="must be a directory"):
+        problem.testcase_dir(ProjectConfig())

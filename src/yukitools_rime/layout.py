@@ -103,6 +103,8 @@ class ProblemLayout:
         directory = self.output_dir(project_config) / testset_name
         if directory.is_symlink():
             raise LayoutError(f"testcase directory must not be a symlink: {directory}")
+        if directory.exists() and not directory.is_dir():
+            raise LayoutError(f"testcase path must be a directory: {directory}")
         return directory
 
 
