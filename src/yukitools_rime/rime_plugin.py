@@ -370,7 +370,13 @@ def _testset_adapter(base: type[Any]) -> type[Any]:
                 ):
                     raise RuntimeError("generator and judge source files must be distinct")
                 problem = getattr(self, "problem", None)
-                if getattr(problem, "judge_type", None) == 0:
+                judge_type = getattr(problem, "judge_type", 0)
+                if config.rime_kind is None and judge_type != 0:
+                    _validate_regular_source(self, config.src)
+                    raise RuntimeError(
+                        "a sync-only judge cannot execute a custom or reactive judge in Rime"
+                    )
+                if judge_type == 0:
                     # Keep the remote source available for synchronization, but
                     # do not change ordinary Rime output comparison semantics.
                     _validate_regular_source(self, config.src)
@@ -385,6 +391,15 @@ def _testset_adapter(base: type[Any]) -> type[Any]:
 
         def PostLoad(self, ui: Any) -> None:
             try:
+                problem = getattr(self, "problem", None)
+                judges = getattr(self, "judges", None)
+                if (
+                    getattr(problem, "judge_type", 0) != 0
+                    and self.yukicoder_judge_config is None
+                    and isinstance(judges, list)
+                    and not judges
+                ):
+                    raise RuntimeError("a custom or reactive problem requires a Rime judge")
                 super().PostLoad(ui)
             finally:
                 _active.pop("yukicoder_generator", None)

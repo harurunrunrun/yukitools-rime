@@ -147,6 +147,7 @@ def test_problem_delegates_to_standard_problem(monkeypatch: pytest.MonkeyPatch) 
 def test_program_wrappers_delegate_by_rime_kind(monkeypatch: pytest.MonkeyPatch) -> None:
     registry = installed(monkeypatch)
     testset = registry.classes["Testset"]()
+    testset.problem = SimpleNamespace(judge_type=0)
     testset.PreLoad(None)
     testset.exports["yukicoder_generator"](
         lang_id="cpp20",
@@ -188,6 +189,47 @@ def test_normal_judge_source_is_sync_only(monkeypatch: pytest.MonkeyPatch) -> No
     assert testset.yukicoder_judge_config.src == "judge.cpp"
 
 
+def test_sync_only_judge_rejects_custom_problem_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = installed(monkeypatch)
+    testset = registry.classes["Testset"]()
+    testset.problem = SimpleNamespace(judge_type=1)
+    testset.PreLoad(None)
+
+    with pytest.raises(RuntimeError, match="sync-only judge"):
+        testset.exports["yukicoder_judge"](
+            lang_id="remote-only",
+            src="judge.txt",
+            rime_kind=None,
+        )
+
+
+def test_custom_problem_without_any_judge_is_rejected_before_internal_diff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = installed(monkeypatch)
+    testset = registry.classes["Testset"]()
+    testset.problem = SimpleNamespace(judge_type=1)
+    testset.judges = []
+    testset.PreLoad(None)
+
+    with pytest.raises(RuntimeError, match="requires a Rime judge"):
+        testset.PostLoad(None)
+
+
+def test_standard_testset_without_managed_problem_allows_internal_diff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = installed(monkeypatch)
+    testset = registry.classes["Testset"]()
+    testset.problem = SimpleNamespace()
+    testset.judges = []
+    testset.PreLoad(None)
+
+    testset.PostLoad(None)
+
+
 def test_module_function_outside_config_load_is_rejected() -> None:
     rime_plugin._active.clear()
     with pytest.raises(RuntimeError, match="only available"):
@@ -209,6 +251,7 @@ def test_problem_uses_configured_rime_output_directory(
 def test_every_supported_rime_kind_is_delegated(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
     registry = installed(monkeypatch)
     testset = registry.classes["Testset"]()
+    testset.problem = SimpleNamespace(judge_type=1)
     testset.PreLoad(None)
     testset.exports["yukicoder_generator"](
         lang_id="remote",
