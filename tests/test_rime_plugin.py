@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from yukitools_rime import rime_plugin
+from yukitools_rime.models import ProjectConfig
 
 
 class ReloadConfiguration(Exception):
@@ -58,23 +59,26 @@ class Problem(Base):
 class RimeTestset(Base):
     def PreLoad(self, ui: object) -> None:
         super().PreLoad(ui)
-        for suffix in ("generator", "judge"):
-            name = f"cxx_{suffix}"
+        for kind in ("c", "cxx", "java", "kotlin", "rust", "go", "script"):
+            for suffix in ("generator", "judge"):
+                name = f"{kind}_{suffix}"
 
-            def directive(*args: Any, _name: str = name, **kwargs: Any) -> None:
-                self.calls.append((_name, args, kwargs))
+                def directive(*args: Any, _name: str = name, **kwargs: Any) -> None:
+                    self.calls.append((_name, args, kwargs))
 
-            self.exports[name] = directive
+                self.exports[name] = directive
 
 
 class Solution(Base):
     def PreLoad(self, ui: object) -> None:
         super().PreLoad(ui)
+        for kind in ("c", "cxx", "java", "kotlin", "rust", "go", "script"):
+            name = f"{kind}_solution"
 
-        def solution(*args: Any, **kwargs: Any) -> None:
-            self.calls.append(("cxx_solution", args, kwargs))
+            def solution(*args: Any, _name: str = name, **kwargs: Any) -> None:
+                self.calls.append((_name, args, kwargs))
 
-        self.exports["cxx_solution"] = solution
+            self.exports[name] = solution
 
 
 def installed(monkeypatch: pytest.MonkeyPatch) -> Registry:
@@ -165,3 +169,65 @@ def test_module_function_outside_config_load_is_rejected() -> None:
     rime_plugin._active.clear()
     with pytest.raises(RuntimeError, match="only available"):
         rime_plugin.yukicoder_project()
+
+
+def test_problem_uses_configured_rime_output_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = installed(monkeypatch)
+    target = registry.classes["Problem"]()
+    target.base_dir = "/work/problem-a"
+    target.project = SimpleNamespace(
+        yukicoder_config=ProjectConfig(rime_out_dir="generated")
+    )
+    target.PreLoad(None)
+    assert target.out_dir == "/work/problem-a/generated"
+
+
+@pytest.mark.parametrize(
+    "kind", ["c", "cxx", "java", "kotlin", "rust", "go", "script"]
+)
+def test_every_supported_rime_kind_is_delegated(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    registry = installed(monkeypatch)
+    testset = registry.classes["Testset"]()
+    testset.PreLoad(None)
+    testset.exports["yukicoder_generator"](
+        lang_id="remote",
+        src="generator.src",
+        test_case_num=1,
+        rime_kind=kind,
+    )
+    testset.exports["yukicoder_judge"](
+        lang_id="remote",
+        src="judge.src",
+        rime_kind=kind,
+    )
+    assert [call[0] for call in testset.calls] == [
+        f"{kind}_generator",
+        f"{kind}_judge",
+    ]
+
+    solution = registry.classes["Solution"]()
+    solution.PreLoad(None)
+    solution.exports["yukicoder_solution"](
+        lang_id="remote", src="main.src", rime_kind=kind
+    )
+    assert solution.calls[0][0] == f"{kind}_solution"
+
+
+def test_unknown_solution_kind_is_loaded_as_sync_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = installed(monkeypatch)
+    solution = registry.classes["Solution"]()
+    solution._codes = []
+    solution.PreLoad(None)
+    solution.exports["yukicoder_solution"](
+        lang_id="unknown", src="main.txt", rime_kind=None
+    )
+    solution.PostLoad(None)
+    assert solution.yukicoder_sync_only is True
+    assert len(solution._codes) == 1
+    assert solution.IsCorrect() is False

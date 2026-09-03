@@ -7,6 +7,7 @@ keeps the standalone synchronization CLI usable without a Rime installation.
 from __future__ import annotations
 
 import importlib
+import os.path
 from collections.abc import Callable
 from typing import Any
 
@@ -191,6 +192,13 @@ def _problem_adapter(base: type[Any]) -> type[Any]:
 
         def PreLoad(self, ui: Any) -> None:
             super().PreLoad(ui)
+            project_config = getattr(
+                getattr(self, "project", None), "yukicoder_config", None
+            )
+            if project_config is not None:
+                self.out_dir = os.path.join(
+                    self.base_dir, project_config.rime_out_dir
+                )
             self.yukicoder_config = None
             rime_problem = self.exports["problem"]
 
@@ -235,6 +243,21 @@ def _problem_adapter(base: type[Any]) -> type[Any]:
                 raise RuntimeError("yukicoder_problem() declaration is missing")
             try:
                 super().PostLoad(ui)
+                solutions = getattr(self, "solutions", None)
+                if solutions is not None:
+                    sync_only = tuple(
+                        solution
+                        for solution in solutions
+                        if getattr(solution, "yukicoder_sync_only", False)
+                    )
+                    if getattr(self, "reference_solution", None) in sync_only:
+                        ui.errors.Error(
+                            self, "A sync-only solution cannot be the reference solution"
+                        )
+                        self.reference_solution = None
+                    self.solutions = [
+                        solution for solution in solutions if solution not in sync_only
+                    ]
             finally:
                 _active.pop("yukicoder_problem", None)
 
@@ -290,6 +313,7 @@ def _solution_adapter(base: type[Any]) -> type[Any]:
         def PreLoad(self, ui: Any) -> None:
             super().PreLoad(ui)
             self.yukicoder_config = None
+            self.yukicoder_sync_only = False
 
             def define(**kwargs: object) -> None:
                 if self.yukicoder_config is not None:
@@ -297,6 +321,7 @@ def _solution_adapter(base: type[Any]) -> type[Any]:
                 config = SolutionConfig(**kwargs)  # type: ignore[arg-type]
                 _register_code(self, config, "solution", solution=True)
                 self.yukicoder_config = config
+                self.yukicoder_sync_only = config.rime_kind is None
 
             self.exports["yukicoder_solution"] = define
             _active["yukicoder_solution"] = define
@@ -305,12 +330,27 @@ def _solution_adapter(base: type[Any]) -> type[Any]:
             if self.yukicoder_config is None:
                 raise RuntimeError("yukicoder_solution() declaration is missing")
             try:
+                if self.yukicoder_sync_only:
+                    codes = getattr(self, "_codes", None)
+                    if isinstance(codes, list):
+                        codes.append(object())
+                    self.challenge_cases = (
+                        list(self.yukicoder_config.challenge_cases)
+                        if self.yukicoder_config.challenge_cases
+                        else None
+                    )
                 super().PostLoad(ui)
             finally:
                 _active.pop("yukicoder_solution", None)
 
+        def IsCorrect(self) -> bool:
+            if getattr(self, "yukicoder_sync_only", False):
+                return False
+            return bool(super().IsCorrect())
+
     Solution.__name__ = "Solution"
     Solution.__qualname__ = "Solution"
+
     return Solution
 
 
