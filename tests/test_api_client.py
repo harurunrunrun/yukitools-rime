@@ -86,6 +86,14 @@ def test_all_routes_use_the_documented_methods_and_paths() -> None:
     assert seen[-1][2] is None
 
 
+@pytest.mark.parametrize("token", ["tökén", "token with space", "token\r\nheader"])
+def test_client_rejects_tokens_unsafe_for_authorization_headers(token: str) -> None:
+    with pytest.raises(ValueError) as caught:
+        YukicoderClient(token)
+
+    assert token not in str(caught.value)
+
+
 def test_problem_response_parses_eps_from_a_number() -> None:
     payload = {
         "problemId": 7,

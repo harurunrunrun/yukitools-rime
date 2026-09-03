@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from yukitools_rime.auth import DotenvError, MissingTokenError, load_dotenv, resolve_token
+from yukitools_rime.auth import (
+    AuthError,
+    DotenvError,
+    MissingTokenError,
+    load_dotenv,
+    resolve_token,
+)
 
 
 def test_load_dotenv_parses_supported_strict_syntax(tmp_path: Path) -> None:
@@ -85,6 +91,14 @@ def test_missing_token_error_names_keys_but_never_a_value(tmp_path: Path) -> Non
     with pytest.raises(MissingTokenError) as caught:
         resolve_token(tmp_path, 99, environ={"YUKICODER_TOKEN": "  "})
     assert "YUKICODER_TOKEN_99" in str(caught.value)
+
+
+@pytest.mark.parametrize("token", ["tökén", "token with space", "token\nheader"])
+def test_resolve_token_rejects_values_unsafe_for_http_headers(tmp_path: Path, token: str) -> None:
+    with pytest.raises(AuthError) as caught:
+        resolve_token(tmp_path, 1, environ={"YUKICODER_TOKEN_1": token})
+
+    assert token not in str(caught.value)
 
 
 def test_load_dotenv_rejects_symlink_without_reading_target(tmp_path: Path) -> None:

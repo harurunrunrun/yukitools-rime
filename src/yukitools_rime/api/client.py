@@ -30,6 +30,7 @@ from yukitools_rime.api.types import (
     Which,
     judge_status_is_final,
 )
+from yukitools_rime.auth import validate_token
 from yukitools_rime.models import ProblemSettings, Statement
 
 DEFAULT_BASE_URL = "https://yukicoder.me/api"
@@ -118,9 +119,7 @@ class YukicoderClient:
         transport: httpx.BaseTransport | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
-        if not token.strip():
-            raise ValueError("トークンが空です")
-        self._initialize(token.strip(), base_url, timeout, transport, http_client)
+        self._initialize(validate_token(token), base_url, timeout, transport, http_client)
 
     @classmethod
     def anonymous(

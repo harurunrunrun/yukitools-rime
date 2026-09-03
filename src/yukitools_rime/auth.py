@@ -29,6 +29,19 @@ class MissingTokenError(AuthError):
     """Raised when no usable yukicoder token can be found."""
 
 
+def validate_token(value: str) -> str:
+    """Return a stripped HTTP-header-safe token without exposing its value."""
+
+    if not isinstance(value, str):
+        raise AuthError("トークンは文字列で指定してください")
+    token = value.strip()
+    if not token:
+        raise AuthError("トークンが空です")
+    if any(ord(character) < 0x21 or ord(character) > 0x7E for character in token):
+        raise AuthError("トークンには空白や非ASCII文字を使用できません")
+    return token
+
+
 def load_dotenv(path: str | Path) -> dict[str, str]:
     """Read a small, deterministic subset of dotenv syntax.
 
@@ -100,7 +113,7 @@ def _select_token(
         for source in (environ, dotenv):
             value = source.get(key)
             if value is not None and value.strip():
-                return value.strip()
+                return validate_token(value)
     return None
 
 
@@ -153,4 +166,5 @@ __all__ = [
     "load_dotenv",
     "resolve_token",
     "token_keys",
+    "validate_token",
 ]
