@@ -6,6 +6,7 @@ import json
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping
+from typing import TypeVar
 
 import httpx
 
@@ -39,6 +40,7 @@ _HINTS = {
     404: "問題IDまたはファイル名を確認してください。",
 }
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[^\s,;]+")
+_ResponseT = TypeVar("_ResponseT")
 
 
 class YukicoderAPIError(RuntimeError):
@@ -91,6 +93,19 @@ def _api_payload(value: object) -> dict[str, object]:
     raise TypeError("APIリクエストはMappingまたはto_api_dict()対応型で指定してください")
 
 
+def _parse_write_response(
+    raw: object,
+    operation: str,
+    parser: Callable[[object], _ResponseT],
+) -> _ResponseT:
+    try:
+        return parser(raw)
+    except ResponseFormatError as exc:
+        raise ResponseFormatError(
+            f"{operation} のレスポンス形式が不正です。 サーバー側の適用結果は不明です。"
+        ) from exc
+
+
 class YukicoderClient:
     """Typed client with no automatic retries or HTTP-method fallback."""
 
@@ -135,8 +150,12 @@ class YukicoderClient:
             raise ValueError("APIベースURLが不正です") from exc
         if parsed.scheme not in {"http", "https"} or not parsed.host:
             raise ValueError("APIベースURLはhttpまたはhttpsの絶対URLで指定してください")
+        if parsed.username or parsed.password:
+            raise ValueError("APIベースURLにユーザー情報は指定できません")
         if parsed.query or parsed.fragment:
             raise ValueError("APIベースURLにqueryまたはfragmentは指定できません")
+        if token is not None and parsed.scheme != "https":
+            raise ValueError("認証付きAPI通信にはhttpsのベースURLが必要です")
         if http_client is not None and transport is not None:
             raise ValueError("http_client と transport は同時に指定できません")
         self.base_url = normalized
@@ -214,9 +233,9 @@ class YukicoderClient:
                 method, f"{self.base_url}{path}", headers=headers, content=content
             )
         except httpx.HTTPError as exc:
+            outcome = " サーバー側の適用結果は不明です。" if method.upper() != "GET" else ""
             raise YukicoderTransportError(
-                f"{operation} のリクエストを送信できませんでした: "
-                f"{self._redact(str(exc))}"
+                f"{operation} のリクエストを送信できませんでした: {self._redact(str(exc))}{outcome}"
             ) from exc
         if allow_not_found and response.status_code == 404:
             return None
@@ -269,7 +288,12 @@ class YukicoderClient:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{operation} のリクエストをJSONにできませんでした: {exc}") from exc
         response = self._send_body("PUT", path, operation, raw, "application/json")
-        return self._json_response(response, operation, allow_empty=True)
+        try:
+            return self._json_response(response, operation, allow_empty=True)
+        except ResponseFormatError as exc:
+            raise ResponseFormatError(
+                f"{operation} のレスポンスJSONが不正です。 サーバー側の適用結果は不明です。"
+            ) from exc
 
     def get_problem_edit(self, problem_id: int) -> ProblemEditContent:
         pid = _path_id(problem_id, "問題ID")
@@ -290,8 +314,11 @@ class YukicoderClient:
             if statement is None:
                 raise TypeError("ProblemSettings と一緒に Statement を指定してください")
             request = ProblemEditRequest(request, statement)
-        return SaveResponse.from_api_dict(
-            self._put_json(f"/v1/problems/{pid}/edit", request, "問題の保存")
+        operation = "問題の保存"
+        return _parse_write_response(
+            self._put_json(f"/v1/problems/{pid}/edit", request, operation),
+            operation,
+            SaveResponse.from_api_dict,
         )
 
     save_problem = save_problem_edit
@@ -306,8 +333,11 @@ class YukicoderClient:
         self, problem_id: int, request: GeneratorRequest | Mapping[str, object]
     ) -> SaveResponse:
         pid = _path_id(problem_id, "問題ID")
-        return SaveResponse.from_api_dict(
-            self._put_json(f"/v1/problems/{pid}/generator", request, "ジェネレータの保存")
+        operation = "ジェネレータの保存"
+        return _parse_write_response(
+            self._put_json(f"/v1/problems/{pid}/generator", request, operation),
+            operation,
+            SaveResponse.from_api_dict,
         )
 
     def get_judge_code(self, problem_id: int) -> JudgeCodeContent | None:
@@ -317,16 +347,17 @@ class YukicoderClient:
         )
         if response is None:
             return None
-        return JudgeCodeContent.from_api_dict(
-            self._json_response(response, "ジャッジコードの取得")
-        )
+        return JudgeCodeContent.from_api_dict(self._json_response(response, "ジャッジコードの取得"))
 
     def save_judge_code(
         self, problem_id: int, request: JudgeCodeRequest | Mapping[str, object]
     ) -> JudgeCodeSaveResponse:
         pid = _path_id(problem_id, "問題ID")
-        return JudgeCodeSaveResponse.from_api_dict(
-            self._put_json(f"/v1/problems/{pid}/code", request, "ジャッジコードの保存")
+        operation = "ジャッジコードの保存"
+        return _parse_write_response(
+            self._put_json(f"/v1/problems/{pid}/code", request, operation),
+            operation,
+            JudgeCodeSaveResponse.from_api_dict,
         )
 
     def wait_for_judge_code(
@@ -338,13 +369,16 @@ class YukicoderClient:
         sleep: Callable[[float], None] = time.sleep,
     ) -> JudgeCodeContent | None:
         deadline = time.monotonic() + timeout
+        last_result: JudgeCodeContent | None = None
         while True:
             result = self.get_judge_code(problem_id)
-            if result is None or judge_status_is_final(result.status):
+            if result is not None:
+                last_result = result
+            if result is not None and judge_status_is_final(result.status):
                 return result
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return result
+                return last_result
             sleep(min(interval, remaining))
 
     def get_editorial(self, problem_id: int) -> EditorialContent:
@@ -359,8 +393,11 @@ class YukicoderClient:
         pid = _path_id(problem_id, "問題ID")
         if isinstance(request, Statement):
             request = EditorialRequest(request)
-        return SaveResponse.from_api_dict(
-            self._put_json(f"/v1/problems/{pid}/editorial", request, "解説の保存")
+        operation = "解説の保存"
+        return _parse_write_response(
+            self._put_json(f"/v1/problems/{pid}/editorial", request, operation),
+            operation,
+            SaveResponse.from_api_dict,
         )
 
     def list_testcases(self, problem_id: int, which: Which | str) -> list[str]:
@@ -369,7 +406,10 @@ class YukicoderClient:
         raw = self._get_json(f"/v1/problems/{pid}/file/{side}", "テストケース一覧の取得")
         if not isinstance(raw, list) or not all(isinstance(name, str) for name in raw):
             raise ResponseFormatError("テストケース一覧は文字列の配列ではありません")
-        return [validate_testcase_name(name) for name in raw]
+        try:
+            return [validate_testcase_name(name) for name in raw]
+        except ValueError as exc:
+            raise ResponseFormatError("テストケース一覧に安全でないファイル名があります") from exc
 
     def get_testcase(self, problem_id: int, which: Which | str, name: str) -> bytes:
         pid = _path_id(problem_id, "問題ID")
@@ -391,8 +431,7 @@ class YukicoderClient:
         side = _which_value(which)
         items = files.items() if isinstance(files, Mapping) else files
         parts = [
-            Part.file("newfiles", validate_testcase_name(name), content)
-            for name, content in items
+            Part.file("newfiles", validate_testcase_name(name), content) for name, content in items
         ]
         boundary, raw = multipart(parts)
         response = self._send_body(
@@ -402,12 +441,17 @@ class YukicoderClient:
             raw,
             f"multipart/form-data; boundary={boundary}",
         )
-        result = UploadResponse.from_api_dict(
-            self._json_response(response, "テストケースのアップロード")
-        )
-        for name in result.file_names:
-            validate_testcase_name(name)
-        return result
+        try:
+            result = UploadResponse.from_api_dict(
+                self._json_response(response, "テストケースのアップロード")
+            )
+            for name in result.file_names:
+                validate_testcase_name(name)
+        except (ResponseFormatError, ValueError) as exc:
+            raise ResponseFormatError(
+                "テストケースのアップロード応答が不正です。 サーバー側の適用結果は不明です。"
+            ) from exc
+        return UploadResponse(result.file_names, self._redact(result.warning))
 
     def delete_testcase(self, problem_id: int, which: Which | str, name: str) -> None:
         pid = _path_id(problem_id, "問題ID")
@@ -429,14 +473,17 @@ class YukicoderClient:
             raw,
             f"multipart/form-data; boundary={boundary}",
         )
-        return response.text
+        return self._redact(response.text)
 
     def set_solution(
         self, submission_id: int, request: SolutionRequest | Mapping[str, object]
     ) -> SaveResponse:
         sid = _path_id(submission_id, "提出ID")
-        return SaveResponse.from_api_dict(
-            self._put_json(f"/v1/submissions/{sid}/solution", request, "想定解の登録")
+        operation = "想定解の登録"
+        return _parse_write_response(
+            self._put_json(f"/v1/submissions/{sid}/solution", request, operation),
+            operation,
+            SaveResponse.from_api_dict,
         )
 
     save_solution = set_solution

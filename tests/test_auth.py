@@ -51,8 +51,7 @@ def test_token_precedence_is_key_first_then_environment(tmp_path: Path) -> None:
     )
     # A per-problem dotenv value beats a lower-priority shared environment key.
     assert (
-        resolve_token(tmp_path, 42, environ={"YUKICODER_TOKEN": "shared-env"})
-        == "per-problem-file"
+        resolve_token(tmp_path, 42, environ={"YUKICODER_TOKEN": "shared-env"}) == "per-problem-file"
     )
     # Within the same key, the process environment wins.
     assert (
@@ -86,3 +85,19 @@ def test_missing_token_error_names_keys_but_never_a_value(tmp_path: Path) -> Non
     with pytest.raises(MissingTokenError) as caught:
         resolve_token(tmp_path, 99, environ={"YUKICODER_TOKEN": "  "})
     assert "YUKICODER_TOKEN_99" in str(caught.value)
+
+
+def test_load_dotenv_rejects_symlink_without_reading_target(tmp_path: Path) -> None:
+    secret = "must-not-leak"
+    target = tmp_path / "outside.env"
+    target.write_text(f"YUKICODER_TOKEN={secret}\n", encoding="utf-8")
+    link = tmp_path / ".env"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    with pytest.raises(DotenvError) as caught:
+        load_dotenv(link)
+
+    assert secret not in str(caught.value)

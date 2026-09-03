@@ -40,6 +40,8 @@ def load_dotenv(path: str | Path) -> dict[str, str]:
     """
 
     dotenv_path = Path(path)
+    if dotenv_path.is_symlink():
+        raise DotenvError(f"{dotenv_path} はシンボリックリンクにできません")
     if not dotenv_path.is_file():
         return {}
     try:
@@ -55,9 +57,7 @@ def load_dotenv(path: str | Path) -> dict[str, str]:
         if line.startswith("export "):
             line = line[len("export ") :].lstrip()
         if "=" not in line:
-            raise DotenvError(
-                f"{dotenv_path}:{line_number} は KEY=VALUE の形式ではありません"
-            )
+            raise DotenvError(f"{dotenv_path}:{line_number} は KEY=VALUE の形式ではありません")
         raw_key, raw_value = line.split("=", 1)
         key = raw_key.strip()
         if not _KEY_RE.fullmatch(key):
@@ -69,9 +69,7 @@ def load_dotenv(path: str | Path) -> dict[str, str]:
         if value.startswith(("'", '"')):
             quote = value[0]
             if len(value) < 2 or value[-1] != quote:
-                raise DotenvError(
-                    f"{dotenv_path}:{line_number} の引用符が閉じられていません"
-                )
+                raise DotenvError(f"{dotenv_path}:{line_number} の引用符が閉じられていません")
             value = value[1:-1]
         elif value.endswith(("'", '"')):
             raise DotenvError(f"{dotenv_path}:{line_number} の引用符が対応していません")

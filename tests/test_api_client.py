@@ -23,9 +23,7 @@ def test_all_routes_use_the_documented_methods_and_paths() -> None:
     seen: list[tuple[str, str, str | None]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(
-            (request.method, request.url.path, request.headers.get("authorization"))
-        )
+        seen.append((request.method, request.url.path, request.headers.get("authorization")))
         path = request.url.path
         if request.method == "GET" and path.endswith("/generator"):
             return httpx.Response(
@@ -33,9 +31,7 @@ def test_all_routes_use_the_documented_methods_and_paths() -> None:
                 json={"langId": "cpp17", "source": "x", "enable": True, "testCaseNum": 3},
             )
         if request.method == "GET" and path.endswith("/code"):
-            return httpx.Response(
-                200, json={"langId": "cpp17", "source": "x", "status": "AC"}
-            )
+            return httpx.Response(200, json={"langId": "cpp17", "source": "x", "status": "AC"})
         if request.method == "GET" and path.endswith("/editorial"):
             return httpx.Response(200, json={"content": "e", "isMarkdown": True})
         if request.method == "GET" and path.endswith("/file/in"):
@@ -187,9 +183,12 @@ def test_http_error_has_hint_and_redacts_token_without_retry() -> None:
         count += 1
         return httpx.Response(403, text="Bearer top-secret was rejected")
 
-    with YukicoderClient(
-        "top-secret", "https://example.test/api", transport=httpx.MockTransport(handler)
-    ) as client, pytest.raises(YukicoderHTTPError) as caught:
+    with (
+        YukicoderClient(
+            "top-secret", "https://example.test/api", transport=httpx.MockTransport(handler)
+        ) as client,
+        pytest.raises(YukicoderHTTPError) as caught,
+    ):
         client.save_generator(1, {"langId": "x", "source": "", "testCaseNum": 0})
     assert count == 1
     assert "403" in str(caught.value)
@@ -201,9 +200,7 @@ def test_http_error_has_hint_and_redacts_token_without_retry() -> None:
 def test_response_gzip_is_decoded_by_httpx() -> None:
     compressed = gzip.compress(b"raw testcase\n")
     transport = httpx.MockTransport(
-        lambda _: httpx.Response(
-            200, content=compressed, headers={"Content-Encoding": "gzip"}
-        )
+        lambda _: httpx.Response(200, content=compressed, headers={"Content-Encoding": "gzip"})
     )
     with YukicoderClient("t", "https://example.test/api", transport=transport) as client:
         assert client.get_testcase(1, "out", "x.txt") == b"raw testcase\n"
@@ -285,9 +282,10 @@ def test_problem_http_errors_do_not_retry(status_code: int) -> None:
         return httpx.Response(status_code, text="request failed")
 
     transport = httpx.MockTransport(handler)
-    with YukicoderClient(
-        "token", "https://example.test/api", transport=transport
-    ) as client, pytest.raises(YukicoderHTTPError) as caught:
+    with (
+        YukicoderClient("token", "https://example.test/api", transport=transport) as client,
+        pytest.raises(YukicoderHTTPError) as caught,
+    ):
         client.get_problem_edit(7)
 
     assert caught.value.status_code == status_code
@@ -304,9 +302,10 @@ def test_success_with_invalid_json_raises_response_format_error() -> None:
         return httpx.Response(200, content=b"not json")
 
     transport = httpx.MockTransport(handler)
-    with YukicoderClient(
-        "token", "https://example.test/api", transport=transport
-    ) as client, pytest.raises(ResponseFormatError):
+    with (
+        YukicoderClient("token", "https://example.test/api", transport=transport) as client,
+        pytest.raises(ResponseFormatError),
+    ):
         client.get_problem_edit(7)
 
     assert len(requests) == 1
@@ -320,9 +319,145 @@ def test_transport_error_is_wrapped_without_retry() -> None:
         raise httpx.ConnectError("connection failed", request=request)
 
     transport = httpx.MockTransport(handler)
-    with YukicoderClient(
-        "token", "https://example.test/api", transport=transport
-    ) as client, pytest.raises(YukicoderTransportError):
+    with (
+        YukicoderClient("token", "https://example.test/api", transport=transport) as client,
+        pytest.raises(YukicoderTransportError),
+    ):
         client.get_problem_edit(7)
 
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://example.test/api",
+        "https://user:password@example.test/api",
+    ],
+)
+def test_authenticated_client_rejects_insecure_or_credentialed_base_url(
+    base_url: str,
+) -> None:
+    with pytest.raises(ValueError, match=r"API|https|ユーザー"):
+        YukicoderClient("top-secret", base_url)
+
+
+def test_anonymous_client_allows_http_without_authorization() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json=[{"Id": "cpp23", "Name": "C++", "Ver": "23", "Status": ""}],
+        )
+
+    with YukicoderClient.anonymous(
+        "http://example.test/api",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        assert client.languages()[0].id == "cpp23"
+
+    assert len(requests) == 1
+    assert requests[0].url.scheme == "http"
+    assert "authorization" not in requests[0].headers
+
+
+def test_remote_unsafe_testcase_names_are_generic_response_errors() -> None:
+    unsafe_name = "../server-secret-name"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json=[unsafe_name])
+        return httpx.Response(
+            200,
+            json={"FileNames": [unsafe_name], "Warning": ""},
+        )
+
+    transport = httpx.MockTransport(handler)
+    with YukicoderClient(
+        "token",
+        "https://example.test/api",
+        transport=transport,
+    ) as client:
+        with pytest.raises(ResponseFormatError) as list_error:
+            client.list_testcases(1, Which.IN)
+        with pytest.raises(ResponseFormatError) as upload_error:
+            client.upload_testcases(1, Which.IN, {"safe.txt": b"input"})
+
+    assert unsafe_name not in str(list_error.value)
+    assert unsafe_name not in str(upload_error.value)
+    assert "適用結果は不明" in str(upload_error.value)
+
+
+def test_upload_warning_and_submit_response_redact_token() -> None:
+    token = "top-secret-token"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/submit"):
+            return httpx.Response(200, text=f"Bearer {token}; value={token}")
+        return httpx.Response(
+            200,
+            json={
+                "FileNames": ["safe.txt"],
+                "Warning": f"Bearer {token}; value={token}",
+            },
+        )
+
+    with YukicoderClient(
+        token,
+        "https://example.test/api",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        warning = client.upload_testcases(
+            1,
+            Which.IN,
+            {"safe.txt": b"input"},
+        ).warning
+        response = client.submit(1, "cpp23", "int main() {}")
+
+    assert token not in warning
+    assert token not in response
+    assert "<redacted>" in warning
+    assert "<redacted>" in response
+
+
+def test_non_get_transport_error_reports_unknown_remote_outcome() -> None:
+    token = "transport-secret"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(f"Bearer {token}", request=request)
+
+    with (
+        YukicoderClient(
+            token,
+            "https://example.test/api",
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(YukicoderTransportError) as caught,
+    ):
+        client.save_generator(1, GeneratorRequest("cpp23", "source", 1))
+
+    message = str(caught.value)
+    assert "適用結果は不明" in message
+    assert token not in message
+
+
+def test_invalid_write_json_reports_unknown_outcome_and_redacts_token() -> None:
+    token = "response-secret"
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, text=f"not-json Bearer {token}"))
+
+    with (
+        YukicoderClient(
+            token,
+            "https://example.test/api",
+            transport=transport,
+        ) as client,
+        pytest.raises(ResponseFormatError) as caught,
+    ):
+        client.save_generator(1, GeneratorRequest("cpp23", "source", 1))
+
+    message = str(caught.value)
+    assert "適用結果は不明" in message
+    assert token not in message
+    assert "not-json" not in message
