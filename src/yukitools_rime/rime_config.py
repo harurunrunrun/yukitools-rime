@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
-from yukitools_rime.errors import ConfigError, ValidationError
+from yukitools_rime.errors import ConfigError, FileOperationError, ValidationError
+from yukitools_rime.files import read_text_verbatim
 from yukitools_rime.models import (
     GeneratorConfig,
     JudgeConfig,
@@ -83,6 +84,8 @@ def _syntax_error(exc: SyntaxError) -> ConfigError:
 
 
 def _parse_tree(source: str) -> ast.Module:
+    if source.startswith("\ufeff"):
+        source = source[1:]
     try:
         return ast.parse(source)
     except SyntaxError as exc:
@@ -141,6 +144,14 @@ def _find_call(
             raise ConfigError(f"{function}() declaration is missing")
         return None
     call = top_level[0]
+    managed = extract_managed_block(source)
+    if managed is None:
+        raise ConfigError(f"{function}() must be inside a managed configuration block")
+    begin_line = source[: source.index(BEGIN_MARKER)].count("\n") + 1
+    end_line = source[: source.index(END_MARKER)].count("\n") + 1
+    call_end_line = call.end_lineno if call.end_lineno is not None else call.lineno
+    if call.lineno <= begin_line or call_end_line >= end_line:
+        raise ConfigError(f"{function}() must be inside a managed configuration block")
     if call.args:
         raise ConfigError(f"{function}() accepts keyword arguments only")
     values: dict[str, object] = {}
@@ -158,6 +169,15 @@ def _find_call(
             keyword=keyword.arg,
         )
     return values
+
+
+def contains_declaration(source: str, function: str) -> bool:
+    """Return whether a configuration contains a call with the given name."""
+
+    return any(
+        isinstance(node, ast.Call) and _function_name(node) == function
+        for node in ast.walk(_parse_tree(source))
+    )
 
 
 _ModelT = TypeVar("_ModelT")
@@ -370,9 +390,10 @@ def extract_managed_block(source: str) -> str | None:
     if begin_count != 1 or end_count != 1:
         raise ConfigError("managed Rime configuration markers are unbalanced or duplicated")
     begin = source.index(BEGIN_MARKER)
-    end = source.index(END_MARKER, begin) + len(END_MARKER)
-    if source.find(END_MARKER) < begin:
+    end_marker = source.index(END_MARKER)
+    if end_marker < begin:
         raise ConfigError("managed Rime configuration end marker precedes its begin marker")
+    end = end_marker + len(END_MARKER)
     return source[begin:end]
 
 
@@ -394,6 +415,25 @@ def upsert_managed_block(source: str, rendered_block: str) -> str:
     elif source.endswith(newline):
         separator = newline
     return f"{source}{separator}{normalized}{newline}"
+
+
+def upsert_managed_block_at_end(source: str, rendered_block: str) -> str:
+    """Update a managed block and keep it after all unmanaged configuration."""
+
+    old = extract_managed_block(source)
+    if old is None:
+        return upsert_managed_block(source, rendered_block)
+    start = source.index(BEGIN_MARKER)
+    end = source.index(END_MARKER, start) + len(END_MARKER)
+    suffix = source[end:]
+    if not suffix.strip():
+        return upsert_managed_block(source, rendered_block)
+    if suffix.startswith("\r\n"):
+        suffix = suffix[2:]
+    elif suffix.startswith(("\r", "\n")):
+        suffix = suffix[1:]
+    unmanaged = source[:start] + suffix
+    return upsert_managed_block(unmanaged, rendered_block)
 
 
 def merge_remote_problem(local: ProblemConfig, remote: ProblemConfig) -> ProblemConfig:
@@ -419,13 +459,19 @@ def update_problem_block(source: str, remote: ProblemConfig) -> str:
 _T = TypeVar("_T")
 
 
+def read_config_source(path: Path) -> str:
+    """Read a UTF-8 config without changing its BOM or newline spelling."""
+
+    try:
+        return read_text_verbatim(path)
+    except FileOperationError as exc:
+        raise ConfigError(f"cannot read configuration {path}: {exc}") from exc
+
+
 def read_config(path: Path, parser: Callable[[str], _T]) -> _T:
     """Read a UTF-8 config and feed it to a parser."""
 
-    try:
-        source = path.read_text(encoding="utf-8-sig")
-    except OSError as exc:
-        raise ConfigError(f"cannot read configuration {path}: {exc}") from exc
+    source = read_config_source(path)
     try:
         return parser(source)
     except ConfigError as exc:

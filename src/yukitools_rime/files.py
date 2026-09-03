@@ -57,6 +57,16 @@ def read_text(path: Path) -> str:
         raise FileOperationError(f"{display_path(path)} is not valid UTF-8: {exc}") from exc
 
 
+def read_text_verbatim(path: Path) -> str:
+    """Read strict UTF-8 without changing a BOM or newline spelling."""
+
+    data = read_bytes(path)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise FileOperationError(f"{display_path(path)} is not valid UTF-8: {exc}") from exc
+
+
 def _prepare_target(path: Path, *, create_parents: bool) -> tuple[Path, int | None]:
     parent = path.parent
     try:
@@ -272,6 +282,7 @@ __all__ = [
     "normalize_text",
     "read_bytes",
     "read_text",
+    "read_text_verbatim",
     "remove_file",
     "replace_directory_snapshot",
     "require_regular_file",

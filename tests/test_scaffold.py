@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import pytest
 
 from yukitools_rime.api import GeneratorContent, JudgeCodeContent, ProblemEditContent
 from yukitools_rime.commands.scaffold import init_project, new_problem
-from yukitools_rime.errors import ConflictError, ValidationError
+from yukitools_rime.errors import ConfigError, ConflictError, ValidationError
 from yukitools_rime.models import ProblemSettings, ProjectConfig, Which
 from yukitools_rime.rime_config import (
     parse_problem_config,
@@ -301,3 +302,75 @@ def test_new_problem_rejects_existing_directory_and_duplicate_id(tmp_path: Path)
     new_problem(42, root, dir_name="first", client_factory=factory_for(FakeClient()))
     with pytest.raises(ConflictError, match="already exists"):
         new_problem(42, root, dir_name="second", client_factory=factory_for(FakeClient()))
+
+
+def test_init_preserves_project_bom_crlf_and_custom_output_ignore(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    custom = ProjectConfig(
+        base_url="https://mirror.example/api",
+        rime_out_dir="generated",
+    )
+    source = (
+        "\ufeffuse_plugin('rime_plus')\r\n\r\n"
+        + render_project_block(custom).replace("\n", "\r\n")
+    )
+    (root / "PROJECT").write_bytes(source.encode("utf-8"))
+
+    project = init_project(root)
+
+    assert project.config == custom
+    assert (root / "PROJECT").read_bytes() == source.encode("utf-8")
+    ignore = (root / ".gitignore").read_text(encoding="utf-8")
+    assert "generated/\n" in ignore
+    assert "rime-out/\n" not in ignore
+
+
+def test_init_rejects_unmanaged_declaration_without_partial_writes(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    project_file = root / "PROJECT"
+    original = b"yukicoder_project()\n"
+    project_file.write_bytes(original)
+
+    with pytest.raises(ConfigError, match="outside a managed"):
+        init_project(root)
+
+    assert project_file.read_bytes() == original
+    assert not (root / ".gitignore").exists()
+    assert not (root / ".env.example").exists()
+
+
+def test_init_ignore_rules_hide_credentials_and_generated_cases_from_git(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    init_project(root)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    baseline = subprocess.run(
+        ["git", "status", "--short", "--untracked-files=all"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    (root / ".env").write_text("YUKICODER_TOKEN=secret\n", encoding="utf-8")
+    case_dir = root / "a" / "rime-out" / "tests"
+    case_dir.mkdir(parents=True)
+    (case_dir / "sample.in").write_bytes(b"input")
+    (case_dir / "sample.diff").write_bytes(b"output")
+    current = subprocess.run(
+        ["git", "status", "--short", "--untracked-files=all"],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+    assert current == baseline

@@ -18,8 +18,14 @@ from yukitools_rime.api import (
     YukicoderClient,
 )
 from yukitools_rime.auth import resolve_token
-from yukitools_rime.errors import ConflictError, FileOperationError, LayoutError, ValidationError
-from yukitools_rime.files import atomic_write_text, read_text, safe_child
+from yukitools_rime.errors import (
+    ConfigError,
+    ConflictError,
+    FileOperationError,
+    LayoutError,
+    ValidationError,
+)
+from yukitools_rime.files import atomic_write_text, read_text_verbatim, safe_child
 from yukitools_rime.layout import ProblemLayout, ProjectLayout, load_problem, load_project
 from yukitools_rime.models import (
     GeneratorConfig,
@@ -33,12 +39,14 @@ from yukitools_rime.rime_config import (
     BEGIN_MARKER,
     END_MARKER,
     TestsetConfig,
+    contains_declaration,
     extract_managed_block,
     parse_project_config,
     render_problem_block,
     render_project_block,
     render_testset_block,
     upsert_managed_block,
+    upsert_managed_block_at_end,
     write_config_atomic,
 )
 from yukitools_rime.testcase_sync import (
@@ -62,12 +70,13 @@ _ENV_EXAMPLE = """# Copy this file to .env and add one or more credentials.
 # YUKICODER_API_KEY=xxxxxxxxxxxxxxxxxxxx
 """
 
-_GITIGNORE_BLOCK = (
-    f"{BEGIN_MARKER}\n"
-    ".env\n"
-    "rime-out/\n"
-    f"{END_MARKER}\n"
-)
+def _gitignore_block(config: ProjectConfig) -> str:
+    return (
+        f"{BEGIN_MARKER}\n"
+        ".env\n"
+        f"{config.rime_out_dir}/\n"
+        f"{END_MARKER}\n"
+    )
 
 
 class ScaffoldClient(Protocol):
@@ -101,7 +110,7 @@ def _read_optional_file(path: Path) -> str:
         return ""
     if not path.is_file():
         raise FileOperationError(f"not a regular file: {path}")
-    return read_text(path)
+    return read_text_verbatim(path)
 
 
 def _preflight_optional_file(path: Path) -> None:
@@ -131,16 +140,22 @@ def init_project(path: str | Path) -> ProjectLayout:
 
     project_source = _read_optional_file(project_path)
     if extract_managed_block(project_source) is None:
+        if contains_declaration(project_source, "yukicoder_project"):
+            raise ConfigError(
+                "yukicoder_project() exists outside a managed configuration block"
+            )
         project_config = ProjectConfig()
     else:
         project_config = parse_project_config(project_source)
-    updated_project = upsert_managed_block(
+    updated_project = upsert_managed_block_at_end(
         project_source,
         render_project_block(project_config),
     )
 
     ignore_source = _read_optional_file(ignore_path)
-    updated_ignore = upsert_managed_block(ignore_source, _GITIGNORE_BLOCK)
+    updated_ignore = upsert_managed_block(
+        ignore_source, _gitignore_block(project_config)
+    )
 
     if updated_project != project_source:
         write_config_atomic(project_path, updated_project)

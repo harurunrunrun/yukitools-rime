@@ -13,6 +13,7 @@ from yukitools_rime.rime_config import (
     parse_project_config,
     parse_solution_config,
     parse_testset_config,
+    read_config_source,
 )
 
 
@@ -70,7 +71,15 @@ class ProblemLayout:
     def testcase_dir(self, project_config: ProjectConfig) -> Path:
         if self.testset is None:
             raise LayoutError(f"{self.path}: no direct-child TESTSET was found")
-        return self.path / project_config.rime_out_dir / self.testset.path.name
+        directory = self.path / project_config.rime_out_dir / self.testset.path.name
+        resolved = directory.resolve(strict=False)
+        try:
+            resolved.relative_to(self.path)
+        except ValueError as exc:
+            raise LayoutError(
+                f"testcase directory escapes problem root {self.path}: {directory}"
+            ) from exc
+        return directory
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,10 +112,7 @@ class TargetSelection:
 
 
 def _read(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8-sig")
-    except OSError as exc:
-        raise LayoutError(f"cannot read {path}: {exc}") from exc
+    return read_config_source(path)
 
 
 def _regular_config(path: Path) -> bool:
@@ -254,20 +260,32 @@ def read_testcases(
     """Read and validate direct regular .in/.diff pairs as raw bytes."""
 
     root = Path(directory)
+    if root.is_symlink():
+        raise LayoutError(f"testcase directory must not be a symlink: {root}")
     if not root.is_dir():
         if require_nonempty:
             raise LayoutError(f"testcase directory does not exist: {root}")
         return {}
     inputs: dict[str, Path] = {}
     outputs: dict[str, Path] = {}
-    for entry in root.iterdir():
-        if not entry.is_file() or entry.is_symlink():
+    try:
+        entries = tuple(root.iterdir())
+    except OSError as exc:
+        raise LayoutError(f"cannot inspect testcase directory {root}: {exc}") from exc
+    for entry in entries:
+        input_file = entry.name.endswith(".in")
+        output_file = entry.name.endswith(".diff")
+        if not input_file and not output_file:
             continue
-        if entry.name.endswith(".in"):
+        if entry.is_symlink():
+            raise LayoutError(f"testcase path is not a regular file: {entry}")
+        if not entry.is_file():
+            continue
+        if input_file:
             name = entry.name[:-3]
             validate_testcase_name(name)
             inputs[name] = entry
-        elif entry.name.endswith(".diff"):
+        else:
             name = entry.name[:-5]
             validate_testcase_name(name)
             outputs[name] = entry
