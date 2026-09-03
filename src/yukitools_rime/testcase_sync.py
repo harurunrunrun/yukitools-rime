@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
@@ -12,7 +11,13 @@ from pathlib import Path
 from typing import Protocol
 
 from yukitools_rime.errors import ConflictError, FileOperationError, ValidationError
-from yukitools_rime.files import atomic_write_bytes, discard_tree, display_path, read_bytes
+from yukitools_rime.files import (
+    _prepare_directory_swap,
+    atomic_write_bytes,
+    discard_tree,
+    display_path,
+    read_bytes,
+)
 from yukitools_rime.layout import (
     TestCaseData,
     inspect_testcases,
@@ -276,9 +281,9 @@ def replace_local_snapshot(
     except OSError as exc:
         raise FileOperationError(f"could not prepare {display_path(target)}: {exc}") from exc
 
-    stage = Path(tempfile.mkdtemp(dir=parent, prefix=f".{target.name}.stage-"))
-    backup = Path(tempfile.mkdtemp(dir=parent, prefix=f".{target.name}.backup-"))
-    backup.rmdir()
+    stage, backup = _prepare_directory_swap(
+        parent, target.name, label=f"testcase snapshot for {display_path(target)}"
+    )
     try:
         if target.exists():
             stage.rmdir()

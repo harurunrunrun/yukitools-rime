@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from yukitools_rime import files as files_module
 from yukitools_rime.errors import FileOperationError, ValidationError
 from yukitools_rime.files import (
     atomic_write_bytes,
@@ -98,4 +99,32 @@ def test_snapshot_rolls_back_failed_swap(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setattr(os, "replace", replace)
     with pytest.raises(FileOperationError, match="simulated"):
         replace_directory_snapshot(target, {"new": b"new"})
+    assert (target / "old").read_bytes() == b"old"
+
+
+def test_snapshot_cleans_stage_when_backup_allocation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "cases"
+    target.mkdir()
+    (target / "old").write_bytes(b"old")
+    real_mkdtemp = files_module.tempfile.mkdtemp
+    created: list[Path] = []
+    calls = 0
+
+    def fail_second_mkdtemp(*args: object, **kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise PermissionError("backup denied")
+        result = real_mkdtemp(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(Path(result))
+        return result
+
+    monkeypatch.setattr(files_module.tempfile, "mkdtemp", fail_second_mkdtemp)
+    with pytest.raises(FileOperationError, match="backup denied"):
+        replace_directory_snapshot(target, {"new": b"new"})
+
+    assert created and not created[0].exists()
     assert (target / "old").read_bytes() == b"old"

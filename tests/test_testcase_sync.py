@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from yukitools_rime.errors import ConflictError, ValidationError
+from yukitools_rime import files as files_module
+from yukitools_rime.errors import ConflictError, FileOperationError, ValidationError
 from yukitools_rime.layout import TestCaseData as CaseData
 from yukitools_rime.models import Which
 from yukitools_rime.testcase_sync import (
@@ -188,6 +189,22 @@ def test_replace_preserves_artifacts_and_removes_stale_cases(tmp_path: Path) -> 
     assert (target / "new.txt.diff").read_bytes() == b"2"
     assert (target / "README").read_text() == "keep"
     assert (target / "cache.in" / "data").read_text() == "keep"
+
+
+def test_replace_wraps_stage_allocation_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "cases"
+    write_case(target, case("old"))
+
+    def fail_mkdtemp(*_args: object, **_kwargs: object) -> str:
+        raise PermissionError("stage denied")
+
+    monkeypatch.setattr(files_module.tempfile, "mkdtemp", fail_mkdtemp)
+    with pytest.raises(FileOperationError, match="stage denied"):
+        replace_local_snapshot(target, {"new": case("new")})
+    assert (target / "old.in").read_bytes() == b"in"
 
 
 def test_pull_initializes_missing_without_prompt(tmp_path: Path) -> None:

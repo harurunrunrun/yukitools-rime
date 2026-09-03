@@ -31,6 +31,35 @@ def discard_tree(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+def _prepare_directory_swap(
+    parent: Path,
+    name: str,
+    *,
+    label: str,
+) -> tuple[Path, Path]:
+    """Allocate a sibling stage and an absent backup path with safe cleanup."""
+
+    stage: Path | None = None
+    backup: Path | None = None
+    try:
+        stage = Path(tempfile.mkdtemp(dir=parent, prefix=f".{name}.stage-"))
+        backup = Path(tempfile.mkdtemp(dir=parent, prefix=f".{name}.backup-"))
+        backup.rmdir()
+    except BaseException as exc:
+        if stage is not None and stage.exists():
+            discard_tree(stage)
+        if backup is not None and backup.exists():
+            discard_tree(backup)
+        if isinstance(exc, OSError):
+            raise FileOperationError(
+                f"could not prepare {label} in {display_path(parent)}: {exc}"
+            ) from exc
+        raise
+    assert stage is not None
+    assert backup is not None
+    return stage, backup
+
+
 def normalize_text(text: str) -> str:
     """Remove a leading UTF-8 BOM marker and normalize newlines to LF."""
 
@@ -235,9 +264,9 @@ def replace_directory_snapshot(
             f"could not prepare snapshot {display_path(directory)}: {exc}"
         ) from exc
 
-    stage = Path(tempfile.mkdtemp(dir=parent, prefix=f".{directory.name}.stage-"))
-    backup = Path(tempfile.mkdtemp(dir=parent, prefix=f".{directory.name}.backup-"))
-    backup.rmdir()
+    stage, backup = _prepare_directory_swap(
+        parent, directory.name, label=f"snapshot for {display_path(directory)}"
+    )
     try:
         for name, content in validated.items():
             atomic_write_bytes(stage / name, content, create_parents=False)
