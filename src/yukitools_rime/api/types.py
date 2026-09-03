@@ -69,9 +69,7 @@ class ProblemEditRequest:
 
     def to_api_dict(self) -> dict[str, object]:
         body = cast(dict[str, object], self.settings.to_api_dict())
-        body.update(
-            self.statement.to_api_fields(require_nonempty=True, label="問題文")
-        )
+        body.update(self.statement.to_api_fields(require_nonempty=True, label="問題文"))
         return body
 
 

@@ -64,9 +64,7 @@ def list_languages(
         if not isinstance(language, Language):
             raise ValidationError("languages response contains an invalid entry")
     if not include_disabled:
-        languages = [
-            language for language in languages if language.status in {"", "enable"}
-        ]
+        languages = [language for language in languages if language.status in {"", "enable"}]
     return tuple(languages)
 
 

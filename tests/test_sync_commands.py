@@ -422,9 +422,7 @@ def test_project_pull_with_testcases_keeps_all_staged_snapshots_available(
     assert (first / "generated" / "tests" / "first.bin.in").read_bytes() == b"first-in\x00"
     assert (first / "generated" / "tests" / "first.bin.diff").read_bytes() == b"first-out\xff"
     assert (second / "generated" / "tests" / "second.bin.in").read_bytes() == b"second-in\xfe"
-    assert (
-        second / "generated" / "tests" / "second.bin.diff"
-    ).read_bytes() == b"second-out\x00"
+    assert (second / "generated" / "tests" / "second.bin.diff").read_bytes() == b"second-out\x00"
     assert clients[1].calls[-4:] == [
         "list-in",
         "list-out",

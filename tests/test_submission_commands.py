@@ -56,9 +56,7 @@ def selection(
     if isinstance(solution_config, SolutionConfig):
         (solution_path / solution_config.src).write_bytes(source)
     solution = SolutionLayout(solution_path, solution_config)
-    settings = ProblemSettings(
-        "title", "", 1, 1000, 256, "-", "0", False, False, 0, 0
-    )
+    settings = ProblemSettings("title", "", 1, 1000, 256, "-", "0", False, False, 0, 0)
     problem = ProblemLayout(
         problem_path,
         ProblemConfig(42, settings, "A"),
@@ -211,4 +209,3 @@ def test_manage_expected_solution_requires_one_problem(tmp_path: Path) -> None:
     )
     with pytest.raises(LayoutError, match="exactly one"):
         manage_expected_solution(1, all_selection, FakeSubmission(), delete=True)
-

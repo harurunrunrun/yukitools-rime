@@ -13,9 +13,7 @@ from yukitools_rime.models import ProblemConfig, ProblemSettings, ProjectConfig,
 
 
 def problem(path: Path, problem_id: int, rime_id: str) -> ProblemLayout:
-    settings = ProblemSettings(
-        rime_id, "", 1, 1000, 256, "-", "0", False, False, 0, 0
-    )
+    settings = ProblemSettings(rime_id, "", 1, 1000, 256, "-", "0", False, False, 0, 0)
     return ProblemLayout(
         path,
         ProblemConfig(problem_id, settings, rime_id),
@@ -62,7 +60,9 @@ def test_languages_filters_enabled_and_factory_needs_no_project() -> None:
     assert [language.id for language in result] == ["a", "b"]
     assert fake.calls == 1
     assert [language.id for language in list_languages(fake, include_disabled=True)] == [
-        "a", "b", "c"
+        "a",
+        "b",
+        "c",
     ]
 
 
@@ -124,4 +124,3 @@ def test_testcases_validate_side_and_duplicate_names(tmp_path: Path) -> None:
         list_remote_testcases(project, fake, which=Which.IN)
     with pytest.raises(ValidationError, match="which"):
         list_remote_testcases(project, fake, which="side")
-

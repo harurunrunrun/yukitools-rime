@@ -43,8 +43,7 @@ def test_multipart_has_exact_file_and_text_part_shape() -> None:
     assert boundary == "fixed"
     assert (
         b'Content-Disposition: form-data; name="newfiles"; '
-        b'filename="sample.01.txt"\r\nContent-Type: text/plain\r\n\r\n1\n'
-        in body
+        b'filename="sample.01.txt"\r\nContent-Type: text/plain\r\n\r\n1\n' in body
     )
     assert b'Content-Disposition: form-data; name="lang"\r\n\r\ncpp23\r\n' in body
     assert body.endswith(b"--fixed--\r\n")

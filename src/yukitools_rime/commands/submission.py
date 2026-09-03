@@ -73,9 +73,7 @@ def _positive_id(value: object) -> int:
         try:
             result = int(value.strip(), 10)
         except ValueError as exc:
-            raise SubmissionResponseError(
-                f"submission id is not an integer: {value!r}"
-            ) from exc
+            raise SubmissionResponseError(f"submission id is not an integer: {value!r}") from exc
     else:
         raise SubmissionResponseError("submission id must be an integer")
     if result < 1:
