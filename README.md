@@ -11,15 +11,93 @@ Rimeのプロジェクト構成をそのまま使い、yukicoderの問題設定�
 Python 3.11 以上が必要です。CLI 単体では Rime は必須依存ではなく、Rime の
 PROJECT を実行するときだけ遅延 import します。
 
+### GitHub Release からインストールする (推奨)
+
+[Releases](https://github.com/harurunrunrun/yukitools-rime/releases) では、OS に依存しない
+Python wheel とソースアーカイブを公開します。Linux / WSL では次の手順で専用の
+virtual environment に wheel を直接インストールできます。
+
 ~~~console
-python3.11 -m venv .venv
-. .venv/bin/activate
-python -m pip install .
+python3 --version  # 3.11 以上であることを確認
+python3 -m venv ~/.venvs/yukitools-rime
+. ~/.venvs/yukitools-rime/bin/activate
+python -m pip install --upgrade pip
+VERSION=0.1.0
+python -m pip install "https://github.com/harurunrunrun/yukitools-rime/releases/download/v${VERSION}/yukitools_rime-${VERSION}-py3-none-any.whl"
+yukitools-rime --version
 yukitools-rime --help
 ~~~
 
-開発環境は python -m pip install -e ".[dev]" で導入できます。PyPI 公開は
-現時点の対象外で、python -m build による wheel 作成までをサポートします。
+新しいシェルを開いたときは `. ~/.venvs/yukitools-rime/bin/activate` を再実行して
+ください。PyPI では公開していないため、`pip install yukitools-rime` では導入
+できません。システムのPythonへ `sudo pip` でインストールせず、上記のvirtual
+environmentを使用してください。
+
+### git clone してソースからビルドする
+
+Git と Python 3.11 以上を用意し、次をそのまま実行します。
+
+~~~console
+git clone https://github.com/harurunrunrun/yukitools-rime.git
+cd yukitools-rime
+python3 --version  # 3.11 以上であることを確認
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install --upgrade pip build
+python -m build
+python -m pip install --force-reinstall dist/yukitools_rime-0.1.0-py3-none-any.whl
+yukitools-rime --version
+yukitools-rime --help
+~~~
+
+`python -m build` は `dist/` に wheel と sdist を作ります。コマンドを使うシェルでは
+毎回、このclone内の `. .venv/bin/activate` を先に実行してください。
+
+### Rime も同じ環境へインストールする
+
+この手順にはGitも必要です。Rime の PROJECT が `yukitools_rime.rime_plugin` を
+import できるように、上で本ツールを
+導入したものと同じvirtual environmentを有効にしてから、検証済みのRimeを入れます。
+
+~~~console
+python -m pip install "git+https://github.com/icpc-jag/rime.git@bce5de31031e81e64ec9b839ec949724678c1a8d"
+rime help
+~~~
+
+既にRimeをcloneしている場合は、同じ環境で `python -m pip install -e /path/to/rime`
+としても構いません。CLIだけを使い、Rimeの設定を実行しない場合、この導入は不要です。
+
+### 更新する
+
+Release版は新しいRelease番号を `VERSION` へ指定して更新します。
+
+~~~console
+. ~/.venvs/yukitools-rime/bin/activate
+VERSION=0.1.0
+python -m pip install --upgrade "https://github.com/harurunrunrun/yukitools-rime/releases/download/v${VERSION}/yukitools_rime-${VERSION}-py3-none-any.whl"
+yukitools-rime --version
+~~~
+
+clone版はcloneしたディレクトリへ移動し、次のように更新します。buildが表示した
+新しいwheel名を指定してください。同じバージョンのmain上の変更も確実に反映するため、
+`--force-reinstall`を使います。
+
+~~~console
+. .venv/bin/activate
+git pull --ff-only
+python -m build
+python -m pip install --upgrade --force-reinstall dist/yukitools_rime-0.1.0-py3-none-any.whl
+yukitools-rime --version
+~~~
+
+### 開発用インストール
+
+clone内にvirtual environmentを作って有効にしたあと、editable modeで開発用依存も
+導入します。ソースの変更は再インストールなしで反映されます。
+
+~~~console
+python -m pip install -e ".[dev]"
+~~~
 
 ## クイックスタート
 
@@ -261,6 +339,7 @@ yukicoder_problem() へ、必要な TESTSET/SOLUTION directive を上記の専�
 
 ~~~console
 ruff check .
+ruff format --check .
 mypy
 pytest --cov=yukitools_rime
 python -m build
