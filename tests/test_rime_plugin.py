@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os.path
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -244,7 +245,7 @@ def test_problem_uses_configured_rime_output_directory(
     target.base_dir = "/work/problem-a"
     target.project = SimpleNamespace(yukicoder_config=ProjectConfig(rime_out_dir="generated"))
     target.PreLoad(None)
-    assert target.out_dir == "/work/problem-a/generated"
+    assert target.out_dir == os.path.join("/work/problem-a", "generated")
 
 
 @pytest.mark.parametrize("kind", ["c", "cxx", "java", "kotlin", "rust", "go", "script"])

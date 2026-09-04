@@ -160,7 +160,9 @@ def test_find_project_root_from_file_and_failure_paths(tmp_path: Path) -> None:
 def test_project_marker_must_be_regular_not_symlink(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
-    outside = tmp_path / "PROJECT"
+    # Keep the target name distinct on case-insensitive filesystems. Using
+    # "PROJECT" here aliases the "project" directory on Windows.
+    outside = tmp_path / "outside-project-marker"
     outside.write_text(render_project_block(ProjectConfig()), encoding="utf-8")
     try:
         (root / "PROJECT").symlink_to(outside)

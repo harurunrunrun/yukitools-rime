@@ -69,14 +69,13 @@ def _make_project(
 ) -> ProjectLayout:
     tmp_path.mkdir(parents=True, exist_ok=True)
     config = ProjectConfig(rime_out_dir="generated")
-    (tmp_path / "PROJECT").write_text(render_project_block(config), encoding="utf-8")
+    (tmp_path / "PROJECT").write_bytes(render_project_block(config).encode("utf-8"))
     problem = tmp_path / "a"
     problem.mkdir()
-    (problem / "PROBLEM").write_text(
-        render_problem_block(ProblemConfig(1, _settings(), "A")),
-        encoding="utf-8",
+    (problem / "PROBLEM").write_bytes(
+        render_problem_block(ProblemConfig(1, _settings(), "A")).encode("utf-8")
     )
-    (problem / "statement.md").write_text("local statement\n", encoding="utf-8")
+    (problem / "statement.md").write_bytes(b"local statement\n")
     if with_testset:
         tests = problem / "tests"
         tests.mkdir()
@@ -85,11 +84,11 @@ def _make_project(
                 GeneratorConfig("cpp17", "generator.cpp", 2, None, "cxx"),
                 JudgeConfig("cpp17", "judge.cpp", "cxx"),
             )
-            (tests / "generator.cpp").write_text("local generator\n", encoding="utf-8")
-            (tests / "judge.cpp").write_text("local judge\n", encoding="utf-8")
+            (tests / "generator.cpp").write_bytes(b"local generator\n")
+            (tests / "judge.cpp").write_bytes(b"local judge\n")
         else:
             testset = RimeTestsetConfig()
-        (tests / "TESTSET").write_text(render_testset_block(testset), encoding="utf-8")
+        (tests / "TESTSET").write_bytes(render_testset_block(testset).encode("utf-8"))
     return load_project(tmp_path)
 
 

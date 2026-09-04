@@ -32,9 +32,10 @@ def test_atomic_write_preserves_mode(tmp_path: Path) -> None:
     path = tmp_path / "script"
     path.write_bytes(b"old")
     path.chmod(0o750)
+    original_mode = path.stat().st_mode & 0o777
     atomic_write_bytes(path, b"new")
     assert path.read_bytes() == b"new"
-    assert path.stat().st_mode & 0o777 == 0o750
+    assert path.stat().st_mode & 0o777 == original_mode
 
 
 def test_read_rejects_invalid_utf8(tmp_path: Path) -> None:
@@ -137,6 +138,7 @@ def test_atomic_write_failed_replace_preserves_original_and_cleans_temp(
     path = tmp_path / "value"
     path.write_bytes(b"original")
     path.chmod(0o640)
+    original_mode = path.stat().st_mode & 0o777
     real_replace = files_module.os.replace
 
     def fail_target_replace(source: Path, destination: Path) -> None:
@@ -150,5 +152,5 @@ def test_atomic_write_failed_replace_preserves_original_and_cleans_temp(
         atomic_write_bytes(path, b"replacement")
 
     assert path.read_bytes() == b"original"
-    assert path.stat().st_mode & 0o777 == 0o640
+    assert path.stat().st_mode & 0o777 == original_mode
     assert not list(tmp_path.glob(".value.*.tmp"))

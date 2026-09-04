@@ -181,6 +181,7 @@ def test_atomic_write_failure_positions_preserve_original_and_clean_temp(
     target.write_bytes(b"original")
     target.chmod(0o640)
     real_fdopen = os.fdopen
+    original_mode = target.stat().st_mode & 0o777
     real_chmod = Path.chmod
 
     if failure_point == "write":
@@ -214,7 +215,7 @@ def test_atomic_write_failure_positions_preserve_original_and_clean_temp(
         files.atomic_write_bytes(target, b"replacement")
 
     assert target.read_bytes() == b"original"
-    assert target.stat().st_mode & 0o777 == 0o640
+    assert target.stat().st_mode & 0o777 == original_mode
     assert not list(tmp_path.glob(".value.*.tmp"))
 
 
