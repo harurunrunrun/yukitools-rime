@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import ast
 import io
-import os
 import pprint
-import tempfile
 import tokenize
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,7 +17,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from yukitools_rime.errors import ConfigError, FileOperationError, ValidationError
-from yukitools_rime.files import read_text_verbatim
+from yukitools_rime.files import atomic_write_bytes, read_text_verbatim
 from yukitools_rime.models import (
     GeneratorConfig,
     JudgeConfig,
@@ -569,28 +567,17 @@ def read_config(path: Path, parser: Callable[[str], _T]) -> _T:
 
 
 def write_config_atomic(path: Path, source: str) -> None:
-    """Atomically replace a UTF-8 config in the same directory."""
+    """Write a UTF-8 config through the shared safe atomic writer."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
+    if not isinstance(source, str):
+        raise TypeError("write_config_atomic() expects str")
     try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            newline="",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as file:
-            temporary = Path(file.name)
-            file.write(source)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(temporary, path)
-    except OSError as exc:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        data = source.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ConfigError(f"cannot encode configuration {path} as UTF-8: {exc}") from exc
+    try:
+        atomic_write_bytes(path, data)
+    except FileOperationError as exc:
         raise ConfigError(f"cannot write configuration {path}: {exc}") from exc
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from yukitools_rime import rime_config
@@ -26,6 +28,7 @@ from yukitools_rime.rime_config import (
     render_testset_block,
     upsert_managed_block,
     upsert_managed_block_at_end,
+    write_config_atomic,
 )
 
 
@@ -145,3 +148,21 @@ def test_marker_text_inside_multiline_string_is_not_managed() -> None:
 
     assert updated.startswith(original)
     assert parse_project_config(updated) == ProjectConfig()
+
+
+def test_config_writer_rejects_symlink_with_stable_config_error(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "real-PROJECT"
+    target.write_bytes(b"unchanged\r\n")
+    link = tmp_path / "PROJECT"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    with pytest.raises(ConfigError, match="cannot write configuration"):
+        write_config_atomic(link, render_project_block(ProjectConfig()))
+
+    assert target.read_bytes() == b"unchanged\r\n"
+    assert link.is_symlink()

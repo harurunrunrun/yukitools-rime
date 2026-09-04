@@ -128,3 +128,27 @@ def test_snapshot_cleans_stage_when_backup_allocation_fails(
 
     assert created and not created[0].exists()
     assert (target / "old").read_bytes() == b"old"
+
+
+def test_atomic_write_failed_replace_preserves_original_and_cleans_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "value"
+    path.write_bytes(b"original")
+    path.chmod(0o640)
+    real_replace = files_module.os.replace
+
+    def fail_target_replace(source: Path, destination: Path) -> None:
+        if Path(destination) == path:
+            raise OSError("simulated replace failure")
+        real_replace(source, destination)
+
+    monkeypatch.setattr(files_module.os, "replace", fail_target_replace)
+
+    with pytest.raises(FileOperationError, match="replace failure"):
+        atomic_write_bytes(path, b"replacement")
+
+    assert path.read_bytes() == b"original"
+    assert path.stat().st_mode & 0o777 == 0o640
+    assert not list(tmp_path.glob(".value.*.tmp"))
