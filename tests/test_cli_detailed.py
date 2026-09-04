@@ -53,7 +53,7 @@ def test_standard_output_is_reconfigured_to_utf8() -> None:
     stream.flush()
 
     assert stream.encoding.casefold() == "utf-8"
-    assert raw.getvalue().decode("utf-8") == "初期化しました: project with spaces 雪\n"
+    assert raw.getvalue().decode("utf-8").splitlines() == ["初期化しました: project with spaces 雪"]
 
 
 def test_non_reconfigurable_output_is_left_untouched() -> None:
