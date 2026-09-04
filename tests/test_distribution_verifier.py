@@ -31,6 +31,10 @@ check_sensitive_content = cast(
     Callable[[str, bytes], None],
     _VERIFIER._check_sensitive_content,
 )
+check_generated_case_name = cast(
+    Callable[[str], None],
+    _VERIFIER._check_generated_case_name,
+)
 parser_factory = cast(Callable[[], argparse.ArgumentParser], _VERIFIER._parser)
 
 
@@ -48,6 +52,15 @@ def test_sensitive_content_allows_placeholder_and_rejects_token() -> None:
             "secret",
             b"YUKICODER_TOKEN=" + b"ypt_" + b"A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0",
         )
+
+
+def test_manifest_is_not_mistaken_for_a_generated_testcase() -> None:
+    check_generated_case_name("MANIFEST.in")
+    check_generated_case_name("yukitools_rime-1.2.3/MANIFEST.in")
+
+    for name in ("sample.in", "problem/rime-out/sample.in", "sample.diff"):
+        with pytest.raises(VerificationError):
+            check_generated_case_name(name)
 
 
 def test_reserved_backslash_unicode_crlf_and_init_smoke(tmp_path: Path) -> None:
@@ -77,3 +90,29 @@ def test_parser_accepts_wheel_only_install_mode() -> None:
     parsed = parser_factory().parse_args(["--skip-sdist-install"])
 
     assert parsed.skip_sdist_install is True
+
+
+def test_support_sources_are_exactly_expected_in_sdist_not_wheel() -> None:
+    root = Path(__file__).resolve().parents[1]
+    spec = _VERIFIER._load_project(root)
+    source_names = set(spec.source_files)
+
+    support_sources = {
+        "MANIFEST.in",
+        "tools/check_coverage.py",
+        "tools/verify_distribution.py",
+    }
+    assert support_sources <= source_names
+    assert spec.test_files
+    assert all(
+        relative.startswith("tests/") and relative.endswith(".py") for relative in spec.test_files
+    )
+
+    sdist_files, _ = _VERIFIER._sdist_expected(spec)
+    archive_root = f"{spec.archive_stem}-{spec.version}"
+    for relative in support_sources | set(spec.test_files):
+        assert f"{archive_root}/{relative}" in sdist_files
+
+    wheel_files = _VERIFIER._wheel_expected_files(spec)
+    assert "MANIFEST.in" not in wheel_files
+    assert all(not member.startswith(("tests/", "tools/")) for member in wheel_files)

@@ -87,13 +87,18 @@ def _string(value: object, label: str) -> str:
     return value
 
 
-def _regular_source_files(root: Path, pattern: str) -> dict[str, Path]:
+def _regular_python_tree(root: Path, relative_root: str) -> dict[str, Path]:
+    source_root = root / relative_root
+    if source_root.is_symlink() or not source_root.is_dir():
+        raise VerificationError(f"source archive tree is not a directory: {source_root}")
     result: dict[str, Path] = {}
-    for path in sorted(root.glob(pattern)):
+    for path in sorted(source_root.rglob("*")):
         if path.is_symlink():
             raise VerificationError(f"source archive input must not be a symlink: {path}")
-        if path.is_file():
-            result[path.as_posix()] = path
+        if path.is_file() and path.suffix == ".py":
+            result[path.relative_to(root).as_posix()] = path
+    if not result:
+        raise VerificationError(f"source archive tree has no Python files: {source_root}")
     return result
 
 
@@ -112,7 +117,7 @@ def _load_project(root: Path) -> ProjectSpec:
         raise VerificationError(f"release version is not a three-part version: {version!r}")
 
     source_files: dict[str, Path] = {}
-    for relative in ("LICENSE", "README.md", "pyproject.toml"):
+    for relative in ("LICENSE", "MANIFEST.in", "README.md", "pyproject.toml"):
         path = root / relative
         if path.is_symlink() or not path.is_file():
             raise VerificationError(f"required source file is not regular: {path}")
@@ -130,15 +135,10 @@ def _load_project(root: Path) -> ProjectSpec:
     if "src/yukitools_rime/py.typed" not in package_files:
         raise VerificationError("source tree is missing src/yukitools_rime/py.typed")
 
-    tests_root = root / "tests"
-    test_files: set[str] = set()
-    if tests_root.is_dir():
-        for path in sorted(tests_root.rglob("test*.py")):
-            if path.is_symlink() or not path.is_file():
-                raise VerificationError(f"test source must be a regular file: {path}")
-            relative = path.relative_to(root).as_posix()
-            source_files[relative] = path
-            test_files.add(relative)
+    test_sources = _regular_python_tree(root, "tests")
+    source_files.update(test_sources)
+    source_files.update(_regular_python_tree(root, "tools"))
+    test_files = frozenset(test_sources)
 
     archive_stem = re.sub(r"[-_.]+", "_", name)
     return ProjectSpec(
@@ -197,10 +197,12 @@ def _check_sensitive_content(label: str, data: bytes) -> None:
 
 
 def _check_generated_case_name(name: str) -> None:
-    parts = tuple(part.casefold() for part in PurePosixPath(name).parts)
+    path = PurePosixPath(name)
+    parts = tuple(part.casefold() for part in path.parts)
     if ".env" in parts or "rime-out" in parts:
         raise VerificationError(f"credential/generated path found in artifact: {name}")
-    if name.casefold().endswith(_GENERATED_CASE_SUFFIXES):
+    manifest = path.name.casefold() == "manifest.in" and len(path.parts) <= 2
+    if not manifest and name.casefold().endswith(_GENERATED_CASE_SUFFIXES):
         raise VerificationError(f"generated testcase found in artifact: {name}")
 
 
