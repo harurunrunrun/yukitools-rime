@@ -598,6 +598,7 @@ def _clean_environment() -> dict[str, str]:
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     environment["PIP_NO_INPUT"] = "1"
+    environment["PYTHONIOENCODING"] = "utf-8"
     return environment
 
 
@@ -614,6 +615,7 @@ def _run(
             env=_clean_environment(),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
             timeout=timeout,
         )

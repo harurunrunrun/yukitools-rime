@@ -43,6 +43,7 @@ canonical_utf8_text = cast(
     Callable[[bytes, str], bytes],
     _VERIFIER._canonical_utf8_text,
 )
+clean_environment = cast(Callable[[], dict[str, str]], _VERIFIER._clean_environment)
 parser_factory = cast(Callable[[], argparse.ArgumentParser], _VERIFIER._parser)
 
 
@@ -123,6 +124,22 @@ def test_real_windows_cross_drive_path_is_rejected() -> None:
     from yukitools_rime import rime_plugin
 
     assert rime_plugin._is_within(r"C:\root", r"D:\other") is False
+
+
+def test_distribution_subprocess_environment_is_utf8_and_secret_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", "untrusted-import-path")
+    monkeypatch.setenv("PYTHONHOME", "untrusted-python-home")
+    monkeypatch.setenv("YUKICODER_TOKEN", "do-not-leak")
+    monkeypatch.setenv("GH_TOKEN", "do-not-leak")
+
+    environment = clean_environment()
+
+    assert environment["PYTHONIOENCODING"] == "utf-8"
+    assert environment["PYTHONNOUSERSITE"] == "1"
+    for name in ("PYTHONPATH", "PYTHONHOME", "YUKICODER_TOKEN", "GH_TOKEN"):
+        assert name not in environment
 
 
 def test_parser_accepts_wheel_only_install_mode() -> None:
