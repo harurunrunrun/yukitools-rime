@@ -188,10 +188,7 @@ def _boolean(value: object, *, label: str) -> bool:
 def _literal_mapping(value: object, *, label: str) -> dict[str, JsonValue]:
     if not isinstance(value, dict):
         raise ValidationError(f"{label} must be a dictionary")
-    converted = _json_value(value, context=label)
-    if not isinstance(converted, dict):  # pragma: no cover - guarded above
-        raise AssertionError
-    return converted
+    return cast(dict[str, JsonValue], _json_value(value, context=label))
 
 
 @dataclass(slots=True)
