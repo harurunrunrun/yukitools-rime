@@ -694,11 +694,15 @@ with tempfile.TemporaryDirectory(prefix="yukitools-rime-windows-") as temporary:
     (project / ".gitignore").write_bytes(b"# preserve me\r\n")
 
     command = [sys.executable, "-m", "yukitools_rime", "init", str(project)]
+    child_environment = os.environ.copy()
+    child_environment["PYTHONIOENCODING"] = "cp1252"
     for _ in range(2):
         result = subprocess.run(
             command,
+            env=child_environment,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
             timeout=30,
         )
@@ -724,8 +728,10 @@ with tempfile.TemporaryDirectory(prefix="yukitools-rime-windows-") as temporary:
     }
     result = subprocess.run(
         command,
+        env=child_environment,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
         timeout=30,
     )

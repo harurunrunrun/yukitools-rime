@@ -66,12 +66,14 @@ def test_manifest_is_not_mistaken_for_a_generated_testcase() -> None:
 def test_reserved_backslash_unicode_crlf_and_init_smoke(tmp_path: Path) -> None:
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    environment["PYTHONIOENCODING"] = "utf-8"
     result = subprocess.run(
         [sys.executable, "-c", cast(str, _VERIFIER._WINDOWS_PATH_SMOKE)],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
         timeout=60,
     )

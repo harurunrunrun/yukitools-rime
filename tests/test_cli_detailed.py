@@ -44,6 +44,34 @@ def invoke(
     return cli.main(argv, stdin=stdin, stdout=stdout, stderr=stderr), stdin, stdout, stderr
 
 
+def test_standard_output_is_reconfigured_to_utf8() -> None:
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252")
+
+    cli._configure_standard_output(stream)
+    cli._line(stream, "初期化しました: project with spaces 雪")
+    stream.flush()
+
+    assert stream.encoding.casefold() == "utf-8"
+    assert raw.getvalue().decode("utf-8") == "初期化しました: project with spaces 雪\n"
+
+
+def test_non_reconfigurable_output_is_left_untouched() -> None:
+    stream = io.StringIO()
+
+    cli._configure_standard_output(stream)
+    cli._line(stream, "日本語")
+
+    assert stream.getvalue() == "日本語\n"
+
+
+def test_detached_standard_output_is_ignored() -> None:
+    stream = io.TextIOWrapper(io.BytesIO())
+    stream.detach()
+
+    cli._configure_standard_output(stream)
+
+
 def pull_result(
     decisions: list[bool],
     confirm: Any,
@@ -458,6 +486,6 @@ def test_show_pull_without_testcase_changes() -> None:
 
     cli._show_pull(result, stdout, stderr)
 
-    assert "更新: problem/PROBLEM" in stdout.getvalue()
+    assert f"更新: {Path('problem') / 'PROBLEM'}" in stdout.getvalue()
     assert "テストケース:" not in stdout.getvalue()
     assert stderr.getvalue() == "警告: warning\n"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -160,6 +161,18 @@ class ClientPool:
 
 def _line(stream: TextIO, value: str = "") -> None:
     stream.write(value + "\n")
+
+
+def _configure_standard_output(stream: TextIO) -> None:
+    """Make redirected Windows output capable of representing Japanese text."""
+
+    if not isinstance(stream, io.TextIOWrapper):
+        return
+    try:
+        stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+    except (OSError, ValueError):
+        # Embedded hosts can expose an already detached or otherwise fixed stream.
+        return
 
 
 def _confirm_testcases(
@@ -360,6 +373,10 @@ def main(
     stderr: TextIO | None = None,
 ) -> int:
     parser = build_parser()
+    if stdout is None:
+        _configure_standard_output(sys.stdout)
+    if stderr is None:
+        _configure_standard_output(sys.stderr)
     args = parser.parse_args(argv)
     output = sys.stdout if stdout is None else stdout
     errors = sys.stderr if stderr is None else stderr
