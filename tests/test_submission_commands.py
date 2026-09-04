@@ -209,3 +209,45 @@ def test_manage_expected_solution_requires_one_problem(tmp_path: Path) -> None:
     )
     with pytest.raises(LayoutError, match="exactly one"):
         manage_expected_solution(1, all_selection, FakeSubmission(), delete=True)
+
+
+def test_submission_rejects_non_selection_and_non_text_response(tmp_path: Path) -> None:
+    selected, _ = selection(tmp_path)
+    with pytest.raises(TypeError, match="TargetSelection"):
+        submit_solution(object(), FakeSubmission())  # type: ignore[arg-type]
+    with pytest.raises(SubmissionResponseError, match="must be text"):
+        parse_submission_id(None)  # type: ignore[arg-type]
+
+    fake = FakeSubmission('{"id": []}')
+    result = submit_solution(selected, fake)
+    assert result.submission_id is None
+
+
+@pytest.mark.parametrize("submission_id", [True, 0, -1, "1"])
+def test_manage_expected_solution_rejects_invalid_submission_ids(
+    tmp_path: Path,
+    submission_id: object,
+) -> None:
+    selected, _ = selection(tmp_path, select_solution=False)
+    fake = FakeSubmission()
+    with pytest.raises(ValidationError, match="submission_id"):
+        manage_expected_solution(
+            submission_id,  # type: ignore[arg-type]
+            selected,
+            fake,
+            delete=True,
+        )
+    assert fake.solutions == []
+
+
+def test_manage_expected_solution_rejects_non_boolean_delete(tmp_path: Path) -> None:
+    selected, _ = selection(tmp_path, select_solution=False)
+    fake = FakeSubmission()
+    with pytest.raises(ValidationError, match="delete must be true or false"):
+        manage_expected_solution(
+            1,
+            selected,
+            fake,
+            delete=1,  # type: ignore[arg-type]
+        )
+    assert fake.solutions == []

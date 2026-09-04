@@ -124,3 +124,20 @@ def test_testcases_validate_side_and_duplicate_names(tmp_path: Path) -> None:
         list_remote_testcases(project, fake, which=Which.IN)
     with pytest.raises(ValidationError, match="which"):
         list_remote_testcases(project, fake, which="side")
+
+
+def test_query_rejects_invalid_option_response_and_target(tmp_path: Path) -> None:
+    fake = FakeLanguages()
+    with pytest.raises(ValidationError, match="include_disabled"):
+        list_languages(fake, include_disabled=1)  # type: ignore[arg-type]
+
+    fake.values = [object()]  # type: ignore[list-item]
+    with pytest.raises(ValidationError, match="invalid entry"):
+        list_languages(fake)
+
+    testcase_client = FakeTestcases({})
+    with pytest.raises(TypeError, match="ProjectLayout or TargetSelection"):
+        list_remote_testcases(
+            problem(tmp_path / "a", 1, "A"),  # type: ignore[arg-type]
+            testcase_client,
+        )
