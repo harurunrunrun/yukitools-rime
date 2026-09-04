@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, cast
 
+from yukitools_rime.errors import ValidationError
 from yukitools_rime.models import ProblemSettings, Statement, Which
 
 JUDGE_STATUS_OK = "AC"
@@ -35,6 +36,18 @@ def _integer(data: dict[str, Any], key: str, default: int = 0) -> int:
     return value
 
 
+def _required_string(data: dict[str, Any], key: str) -> str:
+    if key not in data:
+        raise ResponseFormatError(f"{key} がありません")
+    return _string(data, key)
+
+
+def _required_integer(data: dict[str, Any], key: str) -> int:
+    if key not in data:
+        raise ResponseFormatError(f"{key} がありません")
+    return _integer(data, key)
+
+
 def _boolean(data: dict[str, Any], key: str, default: bool = False) -> bool:
     value = data.get(key, default)
     if not isinstance(value, bool):
@@ -53,12 +66,23 @@ class ProblemEditContent:
     @classmethod
     def from_api_dict(cls, raw: object) -> ProblemEditContent:
         data = _mapping(raw, "問題")
+        problem_id = _required_integer(data, "problemId")
+        content = _string(data, "content")
+        is_markdown = _boolean(data, "isMarkdown")
+        showable = _boolean(data, "showable")
+        settings_error: ResponseFormatError | None = None
+        try:
+            settings = ProblemSettings.from_api_dict(data)
+        except ValidationError:
+            settings_error = ResponseFormatError("問題設定の形式が不正です")
+        if settings_error is not None:
+            raise settings_error
         return cls(
-            problem_id=_integer(data, "problemId"),
-            content=_string(data, "content"),
-            is_markdown=_boolean(data, "isMarkdown"),
-            showable=_boolean(data, "showable"),
-            settings=ProblemSettings.from_api_dict(data),
+            problem_id=problem_id,
+            content=content,
+            is_markdown=is_markdown,
+            showable=showable,
+            settings=settings,
         )
 
 
@@ -221,9 +245,9 @@ class Language:
     def from_api_dict(cls, raw: object) -> Language:
         data = _mapping(raw, "言語")
         return cls(
-            id=_string(data, "Id"),
-            name=_string(data, "Name"),
-            ver=_string(data, "Ver"),
+            id=_required_string(data, "Id"),
+            name=_required_string(data, "Name"),
+            ver=_required_string(data, "Ver"),
             status=_string(data, "Status"),
         )
 
