@@ -7,8 +7,8 @@ import math
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from typing import TypeVar
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -34,6 +34,7 @@ from yukitools_rime.api.types import (
 )
 from yukitools_rime.auth import validate_token
 from yukitools_rime.models import ProblemSettings, Statement
+from yukitools_rime.url_validation import normalize_http_base_url
 
 DEFAULT_BASE_URL = "https://yukicoder.me/api"
 USER_AGENT = f"yukitools-rime/{__version__}"
@@ -77,31 +78,22 @@ def _path_id(value: int, label: str) -> int:
 
 
 def _normalize_base_url(base_url: str) -> tuple[str, str]:
-    if not isinstance(base_url, str):
+    result: tuple[str, str] | None = None
+    with suppress(ValueError):
+        result = normalize_http_base_url(base_url)
+    if result is None:
         raise ValueError("APIベースURLが不正です")
-    normalized = base_url.rstrip("/")
-    parsed = None
-    try:
-        parsed = urlsplit(normalized)
-        _ = parsed.port
-        httpx.URL(normalized)
-    except (TypeError, ValueError, httpx.InvalidURL):
-        parsed = None
-    if parsed is None:
-        raise ValueError("APIベースURLが不正です")
-    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
-        raise ValueError("APIベースURLはhttpまたはhttpsの絶対URLで指定してください")
-    if parsed.username is not None or parsed.password is not None:
-        raise ValueError("APIベースURLにユーザー情報は指定できません")
-    if parsed.query or parsed.fragment:
-        raise ValueError("APIベースURLにqueryまたはfragmentは指定できません")
-    return normalized, parsed.scheme
+    return result
 
 
 def _poll_seconds(value: float, *, label: str, allow_zero: bool) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{label}は有限の数値で指定してください")
-    normalized = float(value)
+    normalized: float | None = None
+    with suppress(OverflowError, TypeError, ValueError):
+        normalized = float(value)
+    if normalized is None:
+        raise ValueError(f"{label}は有限の数値で指定してください")
     minimum_ok = normalized >= 0 if allow_zero else normalized > 0
     if not math.isfinite(normalized) or not minimum_ok:
         comparator = "0以上" if allow_zero else "0より大きい値"

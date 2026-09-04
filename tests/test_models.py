@@ -162,8 +162,21 @@ def test_project_and_enums() -> None:
         "https://example.test:not-a-port/api",
         "https://example.test:99999/api",
         "https://[::1/api",
+        "https://example.test/api?",
+        "https://example.test/api#",
+        " https://example.test/api",
+        "https://example.test/api ",
+        "https://example.test/api path",
+        "https://example.test/api\tpath",
+        "https://example.test/api\x7fpath",
+        "https://example.test\\other/api",
+        "https://example.test:/api",
+        "https://[::1]:/api",
     ],
 )
 def test_project_rejects_unsafe_or_malformed_base_urls(base_url: str) -> None:
-    with pytest.raises(ValidationError, match="base_url"):
+    with pytest.raises(ValidationError, match="base_url") as caught:
         ProjectConfig(base_url=base_url)
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None

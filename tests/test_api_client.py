@@ -634,14 +634,29 @@ def test_invalid_write_response_has_no_exception_chain() -> None:
         "https://user:password@example.test/api",
         "https://example.test/api?query=1",
         "https://example.test/api#fragment",
+        "https://example.test/api?",
+        "https://example.test/api#",
+        " https://example.test/api",
+        "https://example.test/api ",
+        "https://example.test/api path",
+        "https://example.test/api\tpath",
+        "https://example.test/api\x7fpath",
+        "https://example.test\\other/api",
+        "https://example.test:/api",
+        "https://[::1]:/api",
         "ftp://example.test/api",
         "example.test/api",
         "",
     ],
 )
 def test_invalid_base_urls_use_public_value_error(base_url: str) -> None:
-    with pytest.raises(ValueError, match="APIベースURL"):
-        YukicoderClient.anonymous(base_url)
+    token = "url-validation-secret"
+    with pytest.raises(ValueError, match="APIベースURL") as caught:
+        YukicoderClient(token, base_url)
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert token not in _exception_rendering(caught.value)
 
 
 def test_non_string_base_url_uses_public_value_error() -> None:
@@ -810,6 +825,8 @@ def test_judge_polling_zero_timeout_returns_latest_result_without_sleep() -> Non
         (1.0, float("nan")),
         (1.0, float("inf")),
         (1.0, True),
+        (10**1000, 1.0),
+        (1.0, 10**1000),
     ],
 )
 def test_judge_polling_rejects_invalid_durations_before_request(
