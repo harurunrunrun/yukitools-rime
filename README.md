@@ -22,7 +22,7 @@ python3 --version  # 3.11 以上であることを確認
 python3 -m venv ~/.venvs/yukitools-rime
 . ~/.venvs/yukitools-rime/bin/activate
 python -m pip install --upgrade pip
-VERSION=0.1.0
+VERSION=0.1.1
 python -m pip install "https://github.com/harurunrunrun/yukitools-rime/releases/download/v${VERSION}/yukitools_rime-${VERSION}-py3-none-any.whl"
 yukitools-rime --version
 yukitools-rime --help
@@ -45,7 +45,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip build
 python -m build
-python -m pip install --force-reinstall dist/yukitools_rime-0.1.0-py3-none-any.whl
+python -m pip install --force-reinstall dist/yukitools_rime-0.1.1-py3-none-any.whl
 yukitools-rime --version
 yukitools-rime --help
 ~~~
@@ -73,7 +73,7 @@ Release版は新しいRelease番号を `VERSION` へ指定して更新します�
 
 ~~~console
 . ~/.venvs/yukitools-rime/bin/activate
-VERSION=0.1.0
+VERSION=0.1.1
 python -m pip install --upgrade "https://github.com/harurunrunrun/yukitools-rime/releases/download/v${VERSION}/yukitools_rime-${VERSION}-py3-none-any.whl"
 yukitools-rime --version
 ~~~
@@ -86,7 +86,7 @@ clone版はcloneしたディレクトリへ移動し、次のように更新し�
 . .venv/bin/activate
 git pull --ff-only
 python -m build
-python -m pip install --upgrade --force-reinstall dist/yukitools_rime-0.1.0-py3-none-any.whl
+python -m pip install --upgrade --force-reinstall dist/yukitools_rime-0.1.1-py3-none-any.whl
 yukitools-rime --version
 ~~~
 
@@ -341,12 +341,17 @@ yukicoder_problem() へ、必要な TESTSET/SOLUTION directive を上記の専�
 ruff check .
 ruff format --check .
 mypy
-pytest --cov=yukitools_rime
+python -m pytest -W error --import-mode=importlib --cov=yukitools_rime \
+  --cov-report=term-missing --cov-report=json:coverage.json
+python tools/check_coverage.py coverage.json
 python -m build
+python tools/verify_distribution.py --dist-dir dist --static-only
 ~~~
 
-CI は Python 3.11〜3.14 で lint、型検査、テスト、coverage、wheel とインストール後の
---help を確認し、別ジョブで Rime bce5de3 の実設定ロードを確認します。
+CI は Linux の Python 3.11〜3.14 と Windows の Python 3.11 / 3.14 でテストし、
+warnings-as-errors、importlib mode、未丸めの statement / branch coverage を検証します。
+全体はそれぞれ95%以上、主要モジュールは個別にそれぞれ90%以上が必須です。wheelと
+sdistのfresh install、console entrypoint、Rime bce5de3の実設定load/buildも確認します。
 
 ライセンスは [Apache License 2.0](LICENSE) です。設計と API 調査では
 [yukicoder_tools 97555b9](https://github.com/yuki2006/yukicoder_tools/commit/97555b94b6f828477fbbf2efd572eb599c642b03)
