@@ -218,7 +218,8 @@ jobs:
       - name: Revalidate downloaded artifacts
         run: python tools/verify_distribution.py --dist-dir dist --static-only
 
-      - name: Create or update GitHub Release
+      - name: Preflight existing GitHub Release
+        id: release_preflight
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -226,11 +227,13 @@ jobs:
         run: |
           tag="$GITHUB_REF_NAME"
           version="${tag#v}"
-          wheel="dist/yukitools_rime-${version}-py3-none-any.whl"
-          sdist="dist/yukitools_rime-${version}.tar.gz"
-
-          if gh release view "$tag" > /dev/null 2>&1; then
-            release_json="$(gh release view "$tag" --json assets)"
+          set +e
+          release_json="$(
+            gh api "repos/${GH_REPO}/releases/tags/${tag}" 2>&1
+          )"
+          query_status=$?
+          set -e
+          if test "$query_status" -eq 0; then
             RELEASE_JSON="$release_json" RELEASE_VERSION="$version" python - <<'PY'
           import json
           import os
@@ -249,6 +252,34 @@ jobs:
                   f"{sorted(unexpected)}"
               )
           PY
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+          elif grep -Fq "(HTTP 404)" <<<"$release_json"; then
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+          else
+            printf '%s\n' "$release_json" >&2
+            exit "$query_status"
+          fi
+
+      - name: Create or update GitHub Release
+        id: mutate_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_EXISTS: ${{ steps.release_preflight.outputs.release_exists }}
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          wheel="dist/yukitools_rime-${version}-py3-none-any.whl"
+          sdist="dist/yukitools_rime-${version}.tar.gz"
+
+          if test "$RELEASE_EXISTS" != "true" && test "$RELEASE_EXISTS" != "false"; then
+            echo "release preflight did not report whether the release exists" >&2
+            exit 1
+          fi
+          mutation_marker="${RUNNER_TEMP}/yukitools-rime-release-mutation-${GITHUB_RUN_ID}"
+          : > "$mutation_marker"
+          if test "$RELEASE_EXISTS" = "true"; then
             gh release upload "$tag" "$wheel" "$sdist" --clobber
             gh release edit "$tag" --draft=false --prerelease=false
           else
@@ -322,13 +353,18 @@ jobs:
           done
           python tools/verify_distribution.py --dist-dir "$published_dir" --rime-dir rime
 
-      - name: Re-draft release after failed public verification
-        if: ${{ failure() && steps.verify_public_release.outcome == 'failure' }}
+      - name: Re-draft release after failed mutation or public verification
+        if: ${{ failure() && (steps.mutate_release.outcome == 'failure' || steps.verify_public_release.outcome == 'failure') }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
+          mutation_marker="${RUNNER_TEMP}/yukitools-rime-release-mutation-${GITHUB_RUN_ID}"
+          if ! test -f "$mutation_marker"; then
+            echo "release mutation did not start; cleanup is not required"
+            exit 0
+          fi
           if release_json="$(
             gh release view "$GITHUB_REF_NAME" --json isDraft 2> /dev/null
           )"; then
