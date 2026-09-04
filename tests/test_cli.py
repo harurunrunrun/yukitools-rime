@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import runpy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,6 +25,15 @@ class Input(io.StringIO):
 
 def streams(value: str = "", *, tty: bool = False) -> tuple[Input, io.StringIO, io.StringIO]:
     return Input(value, tty=tty), io.StringIO(), io.StringIO()
+
+
+def test_module_entrypoint_delegates_to_cli(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "main", lambda: 17)
+
+    with pytest.raises(SystemExit) as caught:
+        runpy.run_module("yukitools_rime", run_name="__main__")
+
+    assert caught.value.code == 17
 
 
 def test_empty_command_is_an_argument_error() -> None:
