@@ -8,9 +8,12 @@ import re
 import secrets
 from dataclasses import dataclass
 
+from yukitools_rime.errors import ValidationError
+from yukitools_rime.models import validate_testcase_name as _validate_testcase_name
+
 MIN_COMPRESS_BYTES = 1024
 _FIELD_RE = re.compile(r"[A-Za-z0-9_]+\Z")
-_FILENAME_RE = re.compile(r"[A-Za-z0-9._]+\Z")
+_HTTP_TOKEN_RE = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,18 +57,20 @@ MultipartPart = Part
 def is_safe_testcase_name(name: str) -> bool:
     """Whether *name* is safe both as a local basename and an API path segment."""
 
-    return bool(
-        name
-        and name not in {".", ".."}
-        and not name.startswith(".")
-        and _FILENAME_RE.fullmatch(name)
-    )
+    try:
+        _validate_testcase_name(name)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def validate_testcase_name(name: str) -> str:
-    if not is_safe_testcase_name(name):
-        raise ValueError(f"テストケース名が不正です: {name!r}")
-    return name
+    """Delegate portable testcase validation to the shared domain model."""
+
+    try:
+        return _validate_testcase_name(name, label="テストケース名")
+    except ValidationError:
+        raise ValueError(f"テストケース名が不正です: {name!r}") from None
 
 
 def prepare_body(data: bytes) -> Body:
@@ -99,10 +104,10 @@ def multipart(
         if part.filename is not None:
             validate_testcase_name(part.filename)
 
-    selected = boundary or _pick_boundary(normalized)
-    if not selected or any(ch in selected for ch in '\r\n"'):
+    selected = _pick_boundary(normalized) if boundary is None else boundary
+    if not isinstance(selected, str) or _HTTP_TOKEN_RE.fullmatch(selected) is None:
         raise ValueError("multipart境界が不正です")
-    marker = selected.encode("ascii", errors="strict")
+    marker = selected.encode("ascii")
     if any(marker in part.content for part in normalized):
         raise ValueError("multipart境界がパート本文に含まれています")
 
