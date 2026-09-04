@@ -35,6 +35,10 @@ check_generated_case_name = cast(
     Callable[[str], None],
     _VERIFIER._check_generated_case_name,
 )
+is_exact_generated_setup_cfg = cast(
+    Callable[[bytes], bool],
+    _VERIFIER._is_exact_generated_setup_cfg,
+)
 parser_factory = cast(Callable[[], argparse.ArgumentParser], _VERIFIER._parser)
 
 
@@ -61,6 +65,18 @@ def test_manifest_is_not_mistaken_for_a_generated_testcase() -> None:
     for name in ("sample.in", "problem/rime-out/sample.in", "sample.diff"):
         with pytest.raises(VerificationError):
             check_generated_case_name(name)
+
+
+def test_generated_setup_cfg_accepts_only_exact_native_newlines() -> None:
+    lf = b"[egg_info]\ntag_build = \ntag_date = 0\n\n"
+    crlf = lf.replace(b"\n", b"\r\n")
+
+    assert is_exact_generated_setup_cfg(lf)
+    assert is_exact_generated_setup_cfg(crlf)
+    assert not is_exact_generated_setup_cfg(lf.rstrip())
+    assert not is_exact_generated_setup_cfg(crlf.rstrip())
+    assert not is_exact_generated_setup_cfg(lf.replace(b"0", b"1"))
+    assert not is_exact_generated_setup_cfg(b"[egg_info]\r\ntag_build = \ntag_date = 0\r\n\r\n")
 
 
 def test_reserved_backslash_unicode_crlf_and_init_smoke(tmp_path: Path) -> None:

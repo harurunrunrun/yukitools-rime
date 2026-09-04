@@ -55,6 +55,7 @@ _ENV_ASSIGNMENT_RE = re.compile(
     rb"[ \t]*=[ \t]*([^\r\n#]+)"
 )
 _REQUIREMENT_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]*)(.*)$")
+_SETUP_CFG_LF = b"[egg_info]\ntag_build = \ntag_date = 0\n\n"
 
 
 class VerificationError(RuntimeError):
@@ -85,6 +86,12 @@ def _string(value: object, label: str) -> str:
     if not isinstance(value, str) or not value:
         raise VerificationError(f"{label} must be a non-empty string")
     return value
+
+
+def _is_exact_generated_setup_cfg(data: bytes) -> bool:
+    """Accept setuptools' exact platform-native LF or CRLF rendering."""
+
+    return data in (_SETUP_CFG_LF, _SETUP_CFG_LF.replace(b"\n", b"\r\n"))
 
 
 def _regular_python_tree(root: Path, relative_root: str) -> dict[str, Path]:
@@ -524,7 +531,7 @@ def _verify_sdist(path: Path, spec: ProjectSpec) -> bytes:
         raise VerificationError("sdist dependency_links.txt is not exact")
     if files[f"{egg_info}/requires.txt"] != _render_requires_txt(spec):
         raise VerificationError("sdist requires.txt does not match pyproject.toml")
-    if files[f"{root_name}/setup.cfg"] != (b"[egg_info]\ntag_build = \ntag_date = 0\n\n"):
+    if not _is_exact_generated_setup_cfg(files[f"{root_name}/setup.cfg"]):
         raise VerificationError("sdist generated setup.cfg is not exact")
 
     manifest_name = f"{egg_info}/SOURCES.txt"
