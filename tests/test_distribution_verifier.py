@@ -39,6 +39,10 @@ is_exact_generated_setup_cfg = cast(
     Callable[[bytes], bool],
     _VERIFIER._is_exact_generated_setup_cfg,
 )
+canonical_utf8_text = cast(
+    Callable[[bytes, str], bytes],
+    _VERIFIER._canonical_utf8_text,
+)
 parser_factory = cast(Callable[[], argparse.ArgumentParser], _VERIFIER._parser)
 
 
@@ -77,6 +81,23 @@ def test_generated_setup_cfg_accepts_only_exact_native_newlines() -> None:
     assert not is_exact_generated_setup_cfg(crlf.rstrip())
     assert not is_exact_generated_setup_cfg(lf.replace(b"0", b"1"))
     assert not is_exact_generated_setup_cfg(b"[egg_info]\r\ntag_build = \ntag_date = 0\r\n\r\n")
+
+
+def test_metadata_text_normalizes_only_consistent_lf_or_crlf() -> None:
+    lf = "first 雪\nsecond\n".encode()
+    crlf = lf.replace(b"\n", b"\r\n")
+
+    assert canonical_utf8_text(lf, "LF") == lf
+    assert canonical_utf8_text(crlf, "CRLF") == lf
+
+    for invalid in (
+        b"first\rsecond\n",
+        b"first\r\nsecond\n",
+        b"first\nsecond\r\n",
+        b"invalid-utf8-\xff\n",
+    ):
+        with pytest.raises(VerificationError):
+            canonical_utf8_text(invalid, "invalid")
 
 
 def test_reserved_backslash_unicode_crlf_and_init_smoke(tmp_path: Path) -> None:

@@ -94,6 +94,20 @@ def _is_exact_generated_setup_cfg(data: bytes) -> bool:
     return data in (_SETUP_CFG_LF, _SETUP_CFG_LF.replace(b"\n", b"\r\n"))
 
 
+def _canonical_utf8_text(data: bytes, label: str) -> bytes:
+    """Normalize one consistent LF or CRLF text while rejecting other changes."""
+
+    without_crlf = data.replace(b"\r\n", b"")
+    if b"\r" in without_crlf or (b"\r\n" in data and b"\n" in without_crlf):
+        raise VerificationError(f"{label} has bare or mixed newlines")
+    normalized = data.replace(b"\r\n", b"\n")
+    try:
+        normalized.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise VerificationError(f"{label} is not UTF-8") from exc
+    return normalized
+
+
 def _regular_python_tree(root: Path, relative_root: str) -> dict[str, Path]:
     source_root = root / relative_root
     if source_root.is_symlink() or not source_root.is_dir():
@@ -342,7 +356,11 @@ def _validate_metadata(data: bytes, spec: ProjectSpec) -> None:
         )
     readme = (spec.root / "README.md").read_bytes()
     payload = message.get_payload(decode=True)
-    if not isinstance(payload, bytes) or payload != readme:
+    if not isinstance(payload, bytes):
+        raise VerificationError("metadata long description is not bytes")
+    if _canonical_utf8_text(payload, "metadata long description") != _canonical_utf8_text(
+        readme, "README.md"
+    ):
         raise VerificationError("metadata long description does not exactly match README.md")
 
 
