@@ -17,8 +17,8 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -47,16 +47,16 @@ jobs:
 
     steps:
       - name: Check out yukitools-rime
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: yukitools-rime
       - name: Check out reference Rime
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: icpc-jag/rime
           ref: bce5de31031e81e64ec9b839ec949724678c1a8d
           path: rime
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip

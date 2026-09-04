@@ -24,21 +24,21 @@ jobs:
 
     steps:
       - name: Check out yukitools-rime
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: yukitools-rime
           fetch-depth: 0
           persist-credentials: false
 
       - name: Check out reference Rime
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: icpc-jag/rime
           ref: bce5de31031e81e64ec9b839ec949724678c1a8d
           path: rime
           persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -148,7 +148,7 @@ jobs:
           "$smoke_env/bin/yukitools-rime" --help > /dev/null
 
       - name: Store release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ github.run_id }}
           path: |
@@ -168,12 +168,12 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
       - name: Download verified artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-${{ github.run_id }}
           path: dist
