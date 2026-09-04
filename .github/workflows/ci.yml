@@ -8,17 +8,20 @@ permissions:
   contents: read
 
 jobs:
-  quality:
-    name: Python ${{ matrix.python-version }}
+  linux-quality:
+    name: Linux / Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -26,46 +29,92 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
-      - name: Ruff
-        run: ruff check .
-      - name: Ruff format
-        run: ruff format --check .
-      - name: mypy
-        run: mypy
-      - name: pytest with coverage
-        run: pytest --cov=yukitools_rime --cov-report=term-missing --cov-report=xml
-      - name: Build wheel
-        run: python -m build
-      - name: Install built wheel
-        run: python -m pip install --force-reinstall --no-deps dist/*.whl
-      - name: Smoke-test installed command
-        run: yukitools-rime --help
+      - name: Static analysis
+        if: matrix.python-version == '3.11'
+        run: |
+          ruff check .
+          ruff format --check .
+          mypy
+          mypy --strict tools/check_coverage.py tools/verify_distribution.py
+      - name: Test and enforce coverage
+        run: |
+          python -m pytest -W error --import-mode=importlib --cov=yukitools_rime --cov-report=term-missing --cov-report=json:coverage.json
+          python tools/check_coverage.py coverage.json
+      - name: Source-tree CLI smoke
+        run: python -m yukitools_rime --help
 
-  rime-reference-smoke:
-    name: Rime bce5de3 smoke test
+  windows-quality:
+    name: Windows / Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Test and enforce coverage
+        run: |
+          python -m pytest -W error --import-mode=importlib --cov=yukitools_rime --cov-report=term-missing --cov-report=json:coverage.json
+          python tools/check_coverage.py coverage.json
+      - name: Windows Unicode and space-path smoke
+        shell: pwsh
+        run: |
+          $project = Join-Path $env:RUNNER_TEMP "yukitools-rime 雪"
+          python -m yukitools_rime init "$project"
+          python -m yukitools_rime --help
+      - name: Fresh wheel pip/console/python-m and reserved/backslash/drive/CRLF init
+        run: |
+          python -m build
+          python tools/verify_distribution.py --dist-dir dist --skip-sdist-install
+
+  distribution:
+    name: Distribution and installed-wheel Rime smoke
+    needs: [linux-quality, windows-quality]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+        working-directory: yukitools-rime
 
     steps:
       - name: Check out yukitools-rime
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
         with:
           path: yukitools-rime
+          persist-credentials: false
       - name: Check out reference Rime
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
         with:
           repository: icpc-jag/rime
           ref: bce5de31031e81e64ec9b839ec949724678c1a8d
           path: rime
-      - uses: actions/setup-python@v7
+          persist-credentials: false
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: yukitools-rime/pyproject.toml
-      - name: Install projects and test dependencies
+      - name: Build wheel and source distribution
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e "./rime"
-          python -m pip install -e "./yukitools-rime[dev]"
-      - name: Load generated configuration with reference Rime
-        working-directory: yukitools-rime
-        run: pytest -q tests/test_rime_smoke.py
+          python -m pip install "build>=1.2"
+          python -m build
+      - name: Verify archives and fresh installations
+        run: |
+          python tools/verify_distribution.py --dist-dir dist --rime-dir ../rime

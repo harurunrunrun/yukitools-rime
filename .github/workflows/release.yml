@@ -13,8 +13,81 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  linux-gate:
+    name: Linux gate / Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Static analysis
+        if: matrix.python-version == '3.11'
+        run: |
+          ruff check .
+          ruff format --check .
+          mypy
+          mypy --strict tools/check_coverage.py tools/verify_distribution.py
+      - name: Test and enforce coverage
+        run: |
+          python -m pytest -W error --import-mode=importlib --cov=yukitools_rime --cov-report=term-missing --cov-report=json:coverage.json
+          python tools/check_coverage.py coverage.json
+
+  windows-gate:
+    name: Windows gate / Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install development dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Test and enforce coverage
+        run: |
+          python -m pytest -W error --import-mode=importlib --cov=yukitools_rime --cov-report=term-missing --cov-report=json:coverage.json
+          python tools/check_coverage.py coverage.json
+      - name: Windows Unicode and space-path smoke
+        shell: pwsh
+        run: |
+          $project = Join-Path $env:RUNNER_TEMP "yukitools-rime 雪"
+          python -m yukitools_rime init "$project"
+          python -m yukitools_rime --help
+      - name: Fresh wheel pip/console/python-m and reserved/backslash/drive/CRLF init
+        run: |
+          python -m build
+          python tools/verify_distribution.py --dist-dir dist --skip-sdist-install
+
   verify-build:
     name: Verify and build release
+    needs: [linux-gate, windows-gate]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -24,36 +97,37 @@ jobs:
 
     steps:
       - name: Check out yukitools-rime
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
         with:
           path: yukitools-rime
           fetch-depth: 0
           persist-credentials: false
 
       - name: Check out reference Rime
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
         with:
           repository: icpc-jag/rime
           ref: bce5de31031e81e64ec9b839ec949724678c1a8d
           path: rime
           persist-credentials: false
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
           cache-dependency-path: yukitools-rime/pyproject.toml
 
-      - name: Install verification dependencies
+      - name: Install build frontend
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
-          python -m pip install -e ../rime
+          python -m pip install "build>=1.2"
 
       - name: Validate annotated tag and package versions
         run: |
           test "$(git cat-file -t "$GITHUB_REF_NAME")" = "tag"
           test "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" = "$(git rev-parse HEAD)"
+          git show-ref --verify --quiet refs/remotes/origin/main
+          git merge-base --is-ancestor "$(git rev-parse "$GITHUB_REF_NAME^{commit}")" refs/remotes/origin/main
           python - <<'PY'
           import ast
           import os
@@ -91,61 +165,11 @@ jobs:
           print(f"validated release {tag}")
           PY
 
-      - name: Run quality gates
-        env:
-          RIME_REFERENCE_DIR: ${{ github.workspace }}/rime
-        run: |
-          test -f "$RIME_REFERENCE_DIR/rime.py"
-          ruff check .
-          ruff format --check .
-          mypy
-          pytest --cov=yukitools_rime --cov-report=term-missing --cov-fail-under=80
-          pytest -q tests/test_rime_smoke.py
-
       - name: Build wheel and source distribution
         run: python -m build
 
-      - name: Validate built artifacts
-        run: |
-          python - <<'PY'
-          import tarfile
-          import zipfile
-          from pathlib import Path
-          import tomllib
-
-          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-          version = project["project"]["version"]
-          wheel_name = f"yukitools_rime-{version}-py3-none-any.whl"
-          sdist_name = f"yukitools_rime-{version}.tar.gz"
-          expected = {wheel_name, sdist_name}
-          dist = Path("dist")
-          actual = {entry.name for entry in dist.iterdir()}
-          if actual != expected:
-              raise SystemExit(
-                  f"unexpected release artifacts: expected {sorted(expected)}, "
-                  f"got {sorted(actual)}"
-              )
-          with zipfile.ZipFile(dist / wheel_name) as wheel:
-              broken = wheel.testzip()
-              if broken is not None:
-                  raise SystemExit(f"corrupt wheel member: {broken}")
-          with tarfile.open(dist / sdist_name, "r:gz") as sdist:
-              expected_root = f"yukitools_rime-{version}/pyproject.toml"
-              if expected_root not in sdist.getnames():
-                  raise SystemExit(f"sdist is missing {expected_root}")
-          print(f"validated {wheel_name} and {sdist_name}")
-          PY
-
-      - name: Smoke-test wheel in a fresh environment
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          wheel="dist/yukitools_rime-${version}-py3-none-any.whl"
-          smoke_env="$RUNNER_TEMP/yukitools-rime-release-smoke"
-          python -m venv "$smoke_env"
-          "$smoke_env/bin/python" -m pip install --upgrade pip
-          "$smoke_env/bin/python" -m pip install "$wheel"
-          test "$("$smoke_env/bin/yukitools-rime" --version)" = "yukitools-rime ${version}"
-          "$smoke_env/bin/yukitools-rime" --help > /dev/null
+      - name: Verify archives and fresh installations
+        run: python tools/verify_distribution.py --dist-dir dist --rime-dir ../rime
 
       - name: Store release artifacts
         uses: actions/upload-artifact@v7
@@ -162,13 +186,26 @@ jobs:
     name: Publish GitHub Release
     needs: verify-build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       actions: read
       contents: write
 
     steps:
-      - uses: actions/setup-python@v7
+      - name: Check out verified source
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Check out reference Rime
+        uses: actions/checkout@v6
+        with:
+          repository: icpc-jag/rime
+          ref: bce5de31031e81e64ec9b839ec949724678c1a8d
+          path: rime
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -179,35 +216,7 @@ jobs:
           path: dist
 
       - name: Revalidate downloaded artifacts
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          RELEASE_VERSION="$version" python - <<'PY'
-          import os
-          import tarfile
-          import zipfile
-          from pathlib import Path
-
-          version = os.environ["RELEASE_VERSION"]
-          wheel_name = f"yukitools_rime-{version}-py3-none-any.whl"
-          sdist_name = f"yukitools_rime-{version}.tar.gz"
-          expected = {wheel_name, sdist_name}
-          dist = Path("dist")
-          actual = {entry.name for entry in dist.iterdir()}
-          if actual != expected:
-              raise SystemExit(
-                  f"unexpected downloaded artifacts: expected {sorted(expected)}, "
-                  f"got {sorted(actual)}"
-              )
-          with zipfile.ZipFile(dist / wheel_name) as wheel:
-              broken = wheel.testzip()
-              if broken is not None:
-                  raise SystemExit(f"corrupt wheel member: {broken}")
-          with tarfile.open(dist / sdist_name, "r:gz") as sdist:
-              expected_root = f"yukitools_rime-{version}/pyproject.toml"
-              if expected_root not in sdist.getnames():
-                  raise SystemExit(f"sdist is missing {expected_root}")
-          PY
+        run: python tools/verify_distribution.py --dist-dir dist --static-only
 
       - name: Create or update GitHub Release
         env:
@@ -276,3 +285,54 @@ jobs:
               )
           print(data["url"])
           PY
+
+      - name: Re-download published asset URLs and verify wheel/sdist/Rime
+        id: verify_public_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          published_dir="$(mktemp -d "${RUNNER_TEMP}/yukitools-rime-published.XXXXXX")"
+          version="${GITHUB_REF_NAME#v}"
+          release_json="$(
+            gh api "repos/${GH_REPO}/releases/tags/${GITHUB_REF_NAME}"
+          )"
+          jq -e \
+            '.draft == false and .prerelease == false and (.assets | length == 2)' \
+            <<<"$release_json" > /dev/null
+          expected_names=(
+            "yukitools_rime-${version}-py3-none-any.whl"
+            "yukitools_rime-${version}.tar.gz"
+          )
+          expected_base="https://github.com/${GH_REPO}/releases/download/${GITHUB_REF_NAME}"
+          for name in "${expected_names[@]}"; do
+            asset_url="$(
+              jq -er --arg name "$name" \
+                '.assets[] | select(.name == $name) | .browser_download_url' \
+                <<<"$release_json"
+            )"
+            test "$asset_url" = "$expected_base/$name"
+            env -u GH_TOKEN -u GITHUB_TOKEN \
+              curl --disable --fail --location --silent --show-error \
+                --retry 5 --retry-all-errors --retry-delay 2 \
+                --proto '=https' --proto-redir '=https' \
+                --output "$published_dir/$name" \
+                "$asset_url"
+          done
+          python tools/verify_distribution.py --dist-dir "$published_dir" --rime-dir rime
+
+      - name: Re-draft release after failed public verification
+        if: ${{ failure() && steps.verify_public_release.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          if release_json="$(
+            gh release view "$GITHUB_REF_NAME" --json isDraft 2> /dev/null
+          )"; then
+            if test "$(jq -r '.isDraft' <<<"$release_json")" = "false"; then
+              gh release edit "$GITHUB_REF_NAME" --draft=true
+            fi
+          fi

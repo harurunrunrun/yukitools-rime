@@ -900,9 +900,12 @@ def _rime_smoke(
         [str(python), "-c", _RIME_PROJECT_SMOKE, str(project)],
         cwd=workspace,
     )
-    rime = [str(python), str(rime_dir / "rime.py")]
-    _run([*rime, "help"], cwd=project, timeout=60)
-    _run([*rime, "build"], cwd=project, timeout=60)
+    rime_name = "rime.exe" if os.name == "nt" else "rime"
+    rime = python.with_name(rime_name)
+    if not rime.is_file():
+        raise VerificationError(f"installed Rime console executable is missing: {rime}")
+    _run([str(rime), "help"], cwd=project, timeout=60)
+    _run([str(rime), "build"], cwd=project, timeout=60)
     if not (project / "a" / "generated").is_dir():
         raise VerificationError("reference Rime did not create the configured output")
     if (project / "a" / "rime-out").exists():
