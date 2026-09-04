@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import tempfile
 from collections.abc import Callable
 from contextlib import ExitStack
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -26,7 +24,14 @@ from yukitools_rime.errors import (
     LayoutError,
     ValidationError,
 )
-from yukitools_rime.files import atomic_write_text, read_text_verbatim, safe_child
+from yukitools_rime.files import (
+    atomic_write_bytes,
+    atomic_write_text,
+    read_bytes,
+    read_text_verbatim,
+    remove_file,
+    safe_child,
+)
 from yukitools_rime.layout import ProblemLayout, ProjectLayout, load_problem, load_project
 from yukitools_rime.models import (
     GeneratorConfig,
@@ -50,6 +55,7 @@ from yukitools_rime.rime_config import (
     upsert_managed_block_at_end,
     write_config_atomic,
 )
+from yukitools_rime.source_languages import source_spec
 from yukitools_rime.testcase_sync import (
     TestcaseAPI,
     TestcaseSnapshot,
@@ -148,20 +154,44 @@ def _validate_existing_output_directories(
                 raise ConfigError(f"rime_out_dir collides with a Rime source directory: {output}")
 
 
-def init_project(path: str | Path) -> ProjectLayout:
-    """Create or augment a Rime project without invoking Git or any network API."""
+def _restore_init_files(
+    backups: list[tuple[Path, bytes | None]],
+) -> Exception | None:
+    rollback_error: Exception | None = None
+    for path, previous in reversed(backups):
+        try:
+            if previous is None:
+                remove_file(path, missing_ok=True)
+            else:
+                atomic_write_bytes(path, previous)
+        except Exception as exc:
+            rollback_error = rollback_error or exc
+    return rollback_error
 
-    requested = Path(path)
-    if requested.is_symlink():
-        raise FileOperationError(f"project path must not be a symlink: {requested}")
+
+def _apply_init_updates(
+    root: Path,
+    updates: tuple[tuple[Path, str], ...],
+) -> ProjectLayout:
+    """Apply init files and include final project loading in the transaction."""
+
+    backups: list[tuple[Path, bytes | None]] = []
     try:
-        requested.mkdir(parents=True, exist_ok=True)
-        root = requested.resolve(strict=True)
-    except OSError as exc:
-        raise FileOperationError(f"could not create project directory {requested}: {exc}") from exc
-    if not root.is_dir():
-        raise FileOperationError(f"project path is not a directory: {root}")
+        for path, source in updates:
+            previous = read_bytes(path) if path.exists() else None
+            backups.append((path, previous))
+            write_config_atomic(path, source)
+        return load_project(root)
+    except BaseException as error:
+        rollback_error = _restore_init_files(backups)
+        if rollback_error is not None:
+            raise FileOperationError(
+                f"project initialization failed and rollback also failed: {rollback_error}"
+            ) from error
+        raise
 
+
+def _initialize_existing_project(root: Path) -> ProjectLayout:
     project_path = root / "PROJECT"
     ignore_path = root / ".gitignore"
     env_example_path = root / ".env.example"
@@ -186,46 +216,57 @@ def init_project(path: str | Path) -> ProjectLayout:
         ignore_source, _gitignore_block(project_config), python_source=False
     )
 
+    updates: list[tuple[Path, str]] = []
     if updated_project != project_source:
-        write_config_atomic(project_path, updated_project)
+        updates.append((project_path, updated_project))
     if updated_ignore != ignore_source:
-        write_config_atomic(ignore_path, updated_ignore)
+        updates.append((ignore_path, updated_ignore))
     if not env_example_path.exists():
-        write_config_atomic(env_example_path, _ENV_EXAMPLE)
-    return load_project(root)
+        updates.append((env_example_path, _ENV_EXAMPLE))
+    return _apply_init_updates(root, tuple(updates))
 
 
-@dataclass(frozen=True, slots=True)
-class _SourceSpec:
-    extension: str
-    rime_kind: str | None
+def _cleanup_created_project(path: Path, error: BaseException) -> None:
+    try:
+        if path.is_symlink():
+            raise OSError(f"refusing to remove unexpected symlink: {path}")
+        if path.exists():
+            shutil.rmtree(path)
+    except OSError as cleanup_error:
+        raise FileOperationError(
+            f"project initialization failed and cleanup also failed: {cleanup_error}"
+        ) from error
 
 
-def _source_spec(lang_id: str) -> _SourceSpec:
-    """Map stable yukicoder language-id families to Rime declarations."""
+def init_project(path: str | Path) -> ProjectLayout:
+    """Create or augment a Rime project as one rollback-safe transaction."""
 
-    language = lang_id.strip().lower()
-    if language.startswith("cpp"):
-        return _SourceSpec("cpp", "cxx")
-    if language == "c" or re.match(r"c\d", language):
-        return _SourceSpec("c", "c")
-    if language.startswith("kotlin"):
-        return _SourceSpec("kt", "kotlin")
-    if language.startswith("java"):
-        return _SourceSpec("java", "java")
-    if language.startswith("rust"):
-        return _SourceSpec("rs", "rust")
-    if language.startswith(("go", "golang")):
-        return _SourceSpec("go", "go")
-    if language.startswith(("python", "pypy")):
-        return _SourceSpec("py", "script")
-    if language.startswith("ruby"):
-        return _SourceSpec("rb", "script")
-    if language.startswith("perl"):
-        return _SourceSpec("pl", "script")
-    if language.startswith(("bash", "sh")):
-        return _SourceSpec("sh", "script")
-    return _SourceSpec("txt", None)
+    requested = Path(path)
+    if requested.is_symlink():
+        raise FileOperationError(f"project path must not be a symlink: {requested}")
+    created_root = not requested.exists()
+    root: Path | None = None
+    try:
+        requested.mkdir(parents=True, exist_ok=True)
+        root = requested.resolve(strict=True)
+    except OSError as exc:
+        if created_root:
+            _cleanup_created_project(requested, exc)
+        raise FileOperationError(
+            f"could not create project directory {requested}: {exc}"
+        ) from exc
+    if not root.is_dir():
+        error = FileOperationError(f"project path is not a directory: {root}")
+        if created_root:
+            _cleanup_created_project(root, error)
+        raise error
+
+    try:
+        return _initialize_existing_project(root)
+    except BaseException as error:
+        if created_root:
+            _cleanup_created_project(root, error)
+        raise
 
 
 def _problem_resources(
@@ -269,7 +310,7 @@ def _problem_resources(
     generator: GeneratorConfig | None = None
     generator_source: str | None = None
     if remote_generator.source.strip():
-        spec = _source_spec(remote_generator.lang_id)
+        spec = source_spec(remote_generator.lang_id)
         generator = GeneratorConfig(
             lang_id=remote_generator.lang_id,
             src=f"generator.{spec.extension}",
@@ -286,7 +327,7 @@ def _problem_resources(
         if not isinstance(remote_judge, JudgeCodeContent):
             raise ValidationError("judge API returned an unexpected response type")
         if remote_judge.source.strip():
-            spec = _source_spec(remote_judge.lang_id)
+            spec = source_spec(remote_judge.lang_id)
             judge = JudgeConfig(
                 lang_id=remote_judge.lang_id,
                 src=f"judge.{spec.extension}",

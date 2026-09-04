@@ -47,6 +47,7 @@ from yukitools_rime.rime_config import (
     render_testset_block,
     upsert_managed_block,
 )
+from yukitools_rime.source_languages import default_source_name, infer_rime_kind
 from yukitools_rime.testcase_sync import (
     SnapshotChanges,
     TestcaseAPI,
@@ -225,45 +226,6 @@ def _fetch_remote(
             testcases = None
         fetched.append(_RemoteProblem(problem, edit, generator, judge, editorial, testcases))
     return tuple(fetched)
-
-
-def infer_rime_kind(lang_id: str) -> str | None:
-    """Infer only Rime kinds with a clear yukicoder language-id mapping."""
-
-    lowered = lang_id.lower()
-    if lowered.startswith("cpp"):
-        return "cxx"
-    if lowered.startswith("python") or lowered.startswith("pypy"):
-        return "script"
-    for prefix, kind in (
-        ("rust", "rust"),
-        ("java", "java"),
-        ("kotlin", "kotlin"),
-        ("go", "go"),
-    ):
-        if lowered.startswith(prefix):
-            return kind
-    if lowered == "c" or lowered.startswith(("c11", "c17", "c2", "gcc")):
-        return "c"
-    return None
-
-
-def default_source_name(stem: str, lang_id: str) -> str:
-    """Choose a safe source basename without claiming support for unknown languages."""
-
-    kind = infer_rime_kind(lang_id)
-    if kind is None:
-        return f"{stem}.txt"
-    extension = {
-        "cxx": "cpp",
-        "c": "c",
-        "script": "py",
-        "rust": "rs",
-        "java": "java",
-        "kotlin": "kt",
-        "go": "go",
-    }[kind]
-    return f"{stem}.{extension}"
 
 
 def _document(

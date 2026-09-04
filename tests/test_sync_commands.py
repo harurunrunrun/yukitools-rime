@@ -14,7 +14,7 @@ from yukitools_rime.api.types import (
     ProblemEditContent,
 )
 from yukitools_rime.commands import sync
-from yukitools_rime.errors import ValidationError
+from yukitools_rime.errors import FileOperationError, ValidationError
 from yukitools_rime.layout import ProjectLayout, load_project, read_testcases
 from yukitools_rime.models import (
     GeneratorConfig,
@@ -532,3 +532,90 @@ def test_pull_rollback_removes_directories_created_before_testcase_failure(
 
     assert file_snapshot(tmp_path) == before
     assert not (problem_path / "tests").exists()
+
+
+@pytest.mark.parametrize(
+    ("lang_id", "source_name", "rime_kind"),
+    [
+        ("cpp23", "generator.cpp", "cxx"),
+        (" C ", "generator.c", "c"),
+        ("c89-clang", "generator.c", "c"),
+        ("gcc14", "generator.c", "c"),
+        ("java21", "generator.java", "java"),
+        ("kotlin2", "generator.kt", "kotlin"),
+        ("rust1.80", "generator.rs", "rust"),
+        ("go1.23", "generator.go", "go"),
+        ("golang", "generator.go", "go"),
+        ("python3", "generator.py", "script"),
+        ("pypy3", "generator.py", "script"),
+        ("ruby3", "generator.rb", "script"),
+        ("perl5", "generator.pl", "script"),
+        ("bash5", "generator.sh", "script"),
+        ("sh", "generator.sh", "script"),
+        ("clang", "generator.txt", None),
+    ],
+)
+def test_new_and_pull_use_complete_shared_language_mapping(
+    lang_id: str,
+    source_name: str,
+    rime_kind: str | None,
+) -> None:
+    assert sync.default_source_name("generator", lang_id) == source_name
+    assert sync.infer_rime_kind(lang_id) == rime_kind
+
+
+def test_pull_preserves_existing_program_local_fields_across_language_change(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    problem_path = project.problems[0].path
+    remote = client(
+        generator=GeneratorContent("ruby3", "puts 1\n", True, 9),
+        judge=JudgeCodeContent("bash5", "exit 0\n", "AC"),
+    )
+
+    sync.pull(project, factory(remote))
+
+    testset = parse_testset_config((problem_path / "tests" / "TESTSET").read_text())
+    assert testset.generator == GeneratorConfig(
+        "ruby3",
+        "custom-generator.cpp",
+        9,
+        "case",
+        "cxx",
+        {"flags": ["-O2"]},
+    )
+    assert testset.judge == JudgeConfig(
+        "bash5",
+        "custom-judge.cpp",
+        "cxx",
+        {"flags": ["-O2"]},
+    )
+    assert (problem_path / "tests" / "custom-generator.cpp").read_text() == "puts 1\n"
+    assert (problem_path / "tests" / "custom-judge.cpp").read_text() == "exit 0\n"
+
+
+def test_pull_real_write_failure_restores_earlier_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(tmp_path)
+    before = file_snapshot(tmp_path)
+    remote = client(statement="changed statement\n")
+    real_write = sync.atomic_write_bytes
+    calls = 0
+
+    def write_once_then_fail(path: Path, data: bytes) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise FileOperationError("simulated second write failure")
+        real_write(path, data)
+
+    monkeypatch.setattr(sync, "atomic_write_bytes", write_once_then_fail)
+
+    with pytest.raises(FileOperationError, match="second write"):
+        sync.pull(project, factory(remote))
+
+    assert calls >= 4
+    assert file_snapshot(tmp_path) == before

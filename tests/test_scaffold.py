@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from yukitools_rime.api import GeneratorContent, JudgeCodeContent, ProblemEditContent
+from yukitools_rime.commands import scaffold as scaffold_module
 from yukitools_rime.commands.scaffold import init_project, new_problem
 from yukitools_rime.errors import ConfigError, ConflictError, ValidationError
 from yukitools_rime.models import ProblemSettings, ProjectConfig, Which
@@ -439,3 +440,74 @@ def test_init_ignore_rules_hide_credentials_and_generated_cases_from_git(
         ).returncode
         == 1
     )
+
+
+def test_init_rolls_back_all_files_when_last_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    ignore = root / ".gitignore"
+    ignore.write_bytes(b"keep-this\r\n")
+    real_write = scaffold_module.write_config_atomic
+    calls = 0
+
+    def fail_env_example(path: Path, source: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise ConfigError("simulated .env.example failure")
+        real_write(path, source)
+
+    monkeypatch.setattr(scaffold_module, "write_config_atomic", fail_env_example)
+
+    with pytest.raises(ConfigError, match="simulated"):
+        init_project(root)
+
+    assert root.is_dir()
+    assert not (root / "PROJECT").exists()
+    assert ignore.read_bytes() == b"keep-this\r\n"
+    assert not (root / ".env.example").exists()
+    assert not list(root.glob(".*.tmp"))
+
+
+def test_init_removes_new_project_tree_when_transaction_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "new-project"
+    real_write = scaffold_module.write_config_atomic
+    calls = 0
+
+    def fail_second_write(path: Path, source: str) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ConfigError("simulated write failure")
+        real_write(path, source)
+
+    monkeypatch.setattr(scaffold_module, "write_config_atomic", fail_second_write)
+
+    with pytest.raises(ConfigError, match="simulated"):
+        init_project(root)
+
+    assert not root.exists()
+
+
+def test_init_rolls_back_files_when_final_project_validation_fails(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    broken = root / "broken"
+    broken.mkdir(parents=True)
+    (broken / "PROBLEM").write_bytes(b"not valid Python (")
+    ignore = root / ".gitignore"
+    ignore.write_bytes(b"original\r\n")
+
+    with pytest.raises(ConfigError):
+        init_project(root)
+
+    assert not (root / "PROJECT").exists()
+    assert ignore.read_bytes() == b"original\r\n"
+    assert not (root / ".env.example").exists()
