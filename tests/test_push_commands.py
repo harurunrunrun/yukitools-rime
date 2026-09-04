@@ -720,3 +720,147 @@ def test_generate_rejects_server_invalid_case_count_before_api(
         push(project, make_client, generate=True)
 
     assert not called
+
+
+def test_partial_testcase_upload_reports_completed_side_and_retry_repairs_it(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    write_case(project.problems[0], "sample", b"input", b"output")
+    client = FakeClient(cases={}, fail_on="upload-out-sample")
+
+    with pytest.raises(PushExecutionError) as caught:
+        push(
+            project,
+            factory({1: client}),
+            include_testcases=True,
+            testcase_refresh_delay=0,
+        )
+
+    assert caught.value.failed_item == "problem 1 testcase outputs [sample]"
+    assert caught.value.completed_items == ("problem 1 testcase inputs [sample]",)
+    assert client.cases == {("in", "sample"): b"input"}
+
+    client.fail_on = None
+    before = len(client.calls)
+    result = push(
+        project,
+        factory({1: client}),
+        include_testcases=True,
+        testcase_refresh_delay=0,
+    )
+
+    retry_writes = [
+        call for call in client.calls[before:] if call.startswith(("upload-", "delete-"))
+    ]
+    assert retry_writes == ["upload-out-sample"]
+    assert result.planned_items == (
+        "problem 1 testcase outputs [sample]",
+        "problem 1 testcase normalization refresh",
+    )
+    assert read_testcases(project.problems[0].path / "generated" / "tests")["sample"] == (
+        push_module.TestCaseData("sample", b"input", b"output")
+    )
+
+
+def test_partial_prune_reports_completed_side_and_retry_deletes_remaining_side(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    write_case(project.problems[0], "keep", b"in", b"out")
+    client = FakeClient(
+        cases={
+            ("in", "keep"): b"in",
+            ("out", "keep"): b"out",
+            ("in", "stale"): b"stale-in",
+            ("out", "stale"): b"stale-out",
+        },
+        fail_on="delete-out-stale",
+    )
+
+    with pytest.raises(PushExecutionError) as caught:
+        push(
+            project,
+            factory({1: client}),
+            include_testcases=True,
+            prune=True,
+            testcase_refresh_delay=0,
+        )
+
+    assert caught.value.failed_item == "problem 1 delete testcase output stale"
+    assert caught.value.completed_items == ("problem 1 delete testcase input stale",)
+    assert ("in", "stale") not in client.cases
+    assert client.cases[("out", "stale")] == b"stale-out"
+
+    client.fail_on = None
+    before = len(client.calls)
+    result = push(
+        project,
+        factory({1: client}),
+        include_testcases=True,
+        prune=True,
+        testcase_refresh_delay=0,
+    )
+
+    retry_writes = [
+        call for call in client.calls[before:] if call.startswith(("upload-", "delete-"))
+    ]
+    assert retry_writes == ["delete-out-stale"]
+    assert result.planned_items == (
+        "problem 1 delete testcase output stale",
+        "problem 1 testcase normalization refresh",
+    )
+
+
+def test_testcase_refresh_tolerates_unrelated_incomplete_remote_case(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    directory = write_case(project.problems[0], "sample", b"new", b"output")
+    client = FakeClient(
+        cases={
+            ("in", "sample"): b"old",
+            ("out", "sample"): b"output",
+            ("in", "unrelated"): b"orphan",
+        }
+    )
+
+    result = push(
+        project,
+        factory({1: client}),
+        include_testcases=True,
+        testcase_refresh_delay=0,
+    )
+
+    assert result.completed_items[-1] == "problem 1 testcase normalization refresh"
+    assert read_testcases(directory)["sample"].input == b"new"
+    assert client.cases[("in", "unrelated")] == b"orphan"
+
+
+def test_dry_run_prunes_only_existing_remote_sides(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    write_case(project.problems[0], "keep", b"in", b"out")
+    client = FakeClient(
+        cases={
+            ("in", "keep"): b"in",
+            ("out", "keep"): b"out",
+            ("in", "input_only"): b"stale",
+            ("out", "output_only"): b"stale",
+        }
+    )
+
+    result = push(
+        project,
+        factory({1: client}),
+        include_testcases=True,
+        prune=True,
+        dry_run=True,
+    )
+
+    assert result.planned_items == (
+        "problem 1 delete testcase input input_only",
+        "problem 1 delete testcase output output_only",
+        "problem 1 testcase normalization refresh",
+    )
+    assert ("in", "input_only") in client.cases
+    assert ("out", "output_only") in client.cases

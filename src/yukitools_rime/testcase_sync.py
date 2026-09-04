@@ -33,6 +33,51 @@ MULTIPART_FILE_OVERHEAD = 512
 TestcaseSnapshot = Mapping[str, TestCaseData]
 
 
+@dataclass(frozen=True, slots=True)
+class RemoteTestcaseSides:
+    """A byte-exact remote snapshot that can represent an incomplete pair."""
+
+    inputs: Mapping[str, bytes]
+    outputs: Mapping[str, bytes]
+
+    @property
+    def names(self) -> frozenset[str]:
+        return frozenset(self.inputs) | frozenset(self.outputs)
+
+    @property
+    def complete_names(self) -> frozenset[str]:
+        return frozenset(self.inputs) & frozenset(self.outputs)
+
+    def require_complete(
+        self,
+        names: Iterable[str] | None = None,
+    ) -> dict[str, TestCaseData]:
+        """Return requested pairs, rejecting any side that is absent."""
+
+        required = self.names if names is None else frozenset(names)
+        missing_outputs = sorted(required - set(self.outputs))
+        missing_inputs = sorted(required - set(self.inputs))
+        if missing_outputs or missing_inputs:
+            details: list[str] = []
+            if missing_outputs:
+                details.append("missing remote outputs for " + ", ".join(missing_outputs))
+            if missing_inputs:
+                details.append("missing remote inputs for " + ", ".join(missing_inputs))
+            raise ValidationError("remote testcase names differ: " + "; ".join(details))
+        return {
+            name: TestCaseData(name, self.inputs[name], self.outputs[name])
+            for name in sorted(required)
+        }
+
+    def complete_snapshot(self) -> dict[str, TestCaseData]:
+        """Return complete pairs while ignoring unrelated incomplete remote cases."""
+
+        return {
+            name: TestCaseData(name, self.inputs[name], self.outputs[name])
+            for name in sorted(self.complete_names)
+        }
+
+
 class _StagedTestcaseSnapshot(Mapping[str, TestCaseData]):
     """A testcase snapshot whose byte bodies remain on disk until accessed."""
 
@@ -131,9 +176,19 @@ def _remote_names(names: list[str], *, side: Which) -> tuple[str, ...]:
     return tuple(sorted(validated))
 
 
-def _paired_remote_names(client: TestcaseAPI, problem_id: int) -> tuple[str, ...]:
+def _remote_side_names(
+    client: TestcaseAPI,
+    problem_id: int,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     inputs = _remote_names(client.list_testcases(problem_id, Which.IN), side=Which.IN)
     outputs = _remote_names(client.list_testcases(problem_id, Which.OUT), side=Which.OUT)
+    return inputs, outputs
+
+
+def _require_paired_remote_names(
+    inputs: tuple[str, ...],
+    outputs: tuple[str, ...],
+) -> tuple[str, ...]:
     input_set = set(inputs)
     output_set = set(outputs)
     if input_set != output_set:
@@ -146,6 +201,10 @@ def _paired_remote_names(client: TestcaseAPI, problem_id: int) -> tuple[str, ...
             details.append("missing remote inputs for " + ", ".join(missing_inputs))
         raise ValidationError("remote testcase names differ: " + "; ".join(details))
     return inputs
+
+
+def _paired_remote_names(client: TestcaseAPI, problem_id: int) -> tuple[str, ...]:
+    return _require_paired_remote_names(*_remote_side_names(client, problem_id))
 
 
 def _fetch_remote_case(
@@ -167,6 +226,26 @@ def fetch_remote_snapshot(client: TestcaseAPI, problem_id: int) -> TestcaseSnaps
         name: _fetch_remote_case(client, problem_id, name)
         for name in _paired_remote_names(client, problem_id)
     }
+
+
+def fetch_remote_sides(client: TestcaseAPI, problem_id: int) -> RemoteTestcaseSides:
+    """Fetch inputs and outputs independently for repair-oriented push operations."""
+
+    input_names, output_names = _remote_side_names(client, problem_id)
+
+    def fetch(which: Which, names: tuple[str, ...]) -> dict[str, bytes]:
+        result: dict[str, bytes] = {}
+        for name in names:
+            data = client.get_testcase(problem_id, which, name)
+            if not isinstance(data, bytes):
+                raise ValidationError(f"remote testcase {name!r} did not return raw bytes")
+            result[name] = data
+        return result
+
+    return RemoteTestcaseSides(
+        fetch(Which.IN, input_names),
+        fetch(Which.OUT, output_names),
+    )
 
 
 def fetch_remote_snapshot_to(
@@ -270,21 +349,32 @@ def replace_local_snapshot(
     target = Path(directory)
     parent = target.parent
     case_names = _validated_snapshot_names(snapshot)
-    try:
-        parent.mkdir(parents=True, exist_ok=True)
-        if parent.is_symlink() or not parent.is_dir():
-            raise FileOperationError(f"invalid testcase parent: {display_path(parent)}")
-        if target.is_symlink() or (target.exists() and not target.is_dir()):
-            raise FileOperationError(f"invalid testcase directory: {display_path(target)}")
-    except FileOperationError:
-        raise
-    except OSError as exc:
-        raise FileOperationError(f"could not prepare {display_path(target)}: {exc}") from exc
+    missing_parents: list[Path] = []
+    cursor = parent
+    while not cursor.exists():
+        missing_parents.append(cursor)
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
 
-    stage, backup = _prepare_directory_swap(
-        parent, target.name, label=f"testcase snapshot for {display_path(target)}"
-    )
+    stage: Path | None = None
+    backup: Path | None = None
+    committed = False
     try:
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+            if parent.is_symlink() or not parent.is_dir():
+                raise FileOperationError(f"invalid testcase parent: {display_path(parent)}")
+            if target.is_symlink() or (target.exists() and not target.is_dir()):
+                raise FileOperationError(f"invalid testcase directory: {display_path(target)}")
+        except FileOperationError:
+            raise
+        except OSError as exc:
+            raise FileOperationError(f"could not prepare {display_path(target)}: {exc}") from exc
+
+        stage, backup = _prepare_directory_swap(
+            parent, target.name, label=f"testcase snapshot for {display_path(target)}"
+        )
         if target.exists():
             stage.rmdir()
             shutil.copytree(target, stage, symlinks=True)
@@ -303,11 +393,15 @@ def replace_local_snapshot(
         if target.exists():
             os.replace(target, backup)
         os.replace(stage, target)
+        committed = True
         if backup.exists():
             discard_tree(backup)
     except BaseException as exc:
+        if stage is None or backup is None:
+            raise
         # The stage disappears only when the final atomic replace commits.
         if not stage.exists() and target.exists():
+            committed = True
             if backup.exists():
                 discard_tree(backup)
             return
@@ -324,11 +418,15 @@ def replace_local_snapshot(
             f"could not replace testcase snapshot {display_path(target)}: {exc}{detail}"
         ) from exc
     finally:
-        committed = not stage.exists() and target.exists()
-        if stage.exists():
+        if stage is not None and stage.exists():
             discard_tree(stage)
-        if backup.exists() and committed:
+        if backup is not None and backup.exists() and committed:
             discard_tree(backup)
+        if not committed:
+            # mkdir(parents=True) may have created more than the immediate parent.
+            for created in missing_parents:
+                with suppress(OSError):
+                    created.rmdir()
 
 
 def pull_testcases(
@@ -409,41 +507,38 @@ def push_testcases(
 
     target = Path(directory)
     local = read_testcases(target, require_nonempty=True)
-    remote = fetch_remote_snapshot(client, problem_id)
+    remote = fetch_remote_sides(client, problem_id)
     input_uploads = {
         name: case.input
         for name, case in local.items()
-        if name not in remote or remote[name].input != case.input
+        if name not in remote.inputs or remote.inputs[name] != case.input
     }
     output_uploads = {
         name: case.output
         for name, case in local.items()
-        if name not in remote or remote[name].output != case.output
+        if name not in remote.outputs or remote.outputs[name] != case.output
     }
     for batch in batch_upload_files(input_uploads):
         client.upload_testcases(problem_id, Which.IN, batch)
     for batch in batch_upload_files(output_uploads):
         client.upload_testcases(problem_id, Which.OUT, batch)
 
-    removed = tuple(sorted(set(remote) - set(local))) if prune else ()
-    for name in removed:
+    stale_inputs = tuple(sorted(set(remote.inputs) - set(local))) if prune else ()
+    stale_outputs = tuple(sorted(set(remote.outputs) - set(local))) if prune else ()
+    for name in stale_inputs:
         client.delete_testcase(problem_id, Which.IN, name)
+    for name in stale_outputs:
         client.delete_testcase(problem_id, Which.OUT, name)
 
-    normalized = fetch_remote_snapshot(client, problem_id)
+    normalized = fetch_remote_sides(client, problem_id)
     uploaded_input_names = set(input_uploads)
     uploaded_output_names = set(output_uploads)
     uploaded_names = uploaded_input_names | uploaded_output_names
-    missing = uploaded_names - set(normalized)
-    if missing:
-        raise ValidationError(
-            "server normalization response omitted uploaded testcases: "
-            + ", ".join(sorted(missing))
-        )
+    normalized_uploaded = normalized.require_complete(uploaded_names)
     refreshed = dict(local)
     for name in uploaded_names:
         local_case = local[name]
-        normalized_case = normalized[name]
+        normalized_case = normalized_uploaded[name]
         refreshed[name] = TestCaseData(
             name,
             normalized_case.input if name in uploaded_input_names else local_case.input,
@@ -451,10 +546,10 @@ def push_testcases(
         )
     replace_local_snapshot(target, refreshed)
     return PushResult(
-        normalized,
+        normalized.complete_snapshot(),
         uploaded_inputs=len(input_uploads),
         uploaded_outputs=len(output_uploads),
-        pruned=len(removed),
+        pruned=len(set(stale_inputs) | set(stale_outputs)),
     )
 
 
@@ -465,12 +560,14 @@ __all__ = [
     "ConfirmReplacement",
     "PullResult",
     "PushResult",
+    "RemoteTestcaseSides",
     "SnapshotChanges",
     "TestcaseAPI",
     "TestcaseSnapshot",
     "batch_upload_files",
     "compare_snapshots",
     "estimate_upload_size",
+    "fetch_remote_sides",
     "fetch_remote_snapshot",
     "fetch_remote_snapshot_to",
     "pull_testcases",

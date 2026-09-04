@@ -43,10 +43,10 @@ from yukitools_rime.models import (
 )
 from yukitools_rime.rime_config import parse_problem_config, parse_testset_config
 from yukitools_rime.testcase_sync import (
+    RemoteTestcaseSides,
     TestcaseAPI,
-    TestcaseSnapshot,
     batch_upload_files,
-    fetch_remote_snapshot,
+    fetch_remote_sides,
     replace_local_snapshot,
 )
 
@@ -179,12 +179,15 @@ class _TestcasePlan:
     local: Mapping[str, TestCaseData]
     input_batches: tuple[dict[str, bytes], ...]
     output_batches: tuple[dict[str, bytes], ...]
-    stale: tuple[str, ...]
+    stale_inputs: tuple[str, ...]
+    stale_outputs: tuple[str, ...]
     directory: Path
 
     @property
     def has_writes(self) -> bool:
-        return bool(self.input_batches or self.output_batches or self.stale)
+        return bool(
+            self.input_batches or self.output_batches or self.stale_inputs or self.stale_outputs
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,9 +219,11 @@ class _ProblemPlan:
                 items.append(f"{prefix} testcase inputs [{', '.join(batch)}]")
             for batch in testcases.output_batches:
                 items.append(f"{prefix} testcase outputs [{', '.join(batch)}]")
-            for name in testcases.stale:
-                items.append(f"{prefix} delete testcase input {name}")
-                items.append(f"{prefix} delete testcase output {name}")
+            for name in sorted(set(testcases.stale_inputs) | set(testcases.stale_outputs)):
+                if name in testcases.stale_inputs:
+                    items.append(f"{prefix} delete testcase input {name}")
+                if name in testcases.stale_outputs:
+                    items.append(f"{prefix} delete testcase output {name}")
             if testcases.has_writes:
                 items.append(f"{prefix} testcase normalization refresh")
         return tuple(items)
@@ -327,7 +332,7 @@ def _same_document(remote_text: str, remote_markdown: bool, local: Statement) ->
 
 def _testcase_plan(
     local: _LocalProblem,
-    remote: TestcaseSnapshot,
+    remote: RemoteTestcaseSides,
     *,
     prune: bool,
 ) -> _TestcasePlan:
@@ -336,19 +341,21 @@ def _testcase_plan(
     inputs = {
         name: case.input
         for name, case in local.testcases.items()
-        if name not in remote or remote[name].input != case.input
+        if name not in remote.inputs or remote.inputs[name] != case.input
     }
     outputs = {
         name: case.output
         for name, case in local.testcases.items()
-        if name not in remote or remote[name].output != case.output
+        if name not in remote.outputs or remote.outputs[name] != case.output
     }
-    stale = tuple(sorted(set(remote) - set(local.testcases))) if prune else ()
+    stale_inputs = tuple(sorted(set(remote.inputs) - set(local.testcases))) if prune else ()
+    stale_outputs = tuple(sorted(set(remote.outputs) - set(local.testcases))) if prune else ()
     return _TestcasePlan(
         local.testcases,
         batch_upload_files(inputs),
         batch_upload_files(outputs),
-        stale,
+        stale_inputs,
+        stale_outputs,
         local.testcase_dir,
     )
 
@@ -437,7 +444,7 @@ def _build_remote_plan(
 
     testcase_plan = None
     if include_testcases:
-        remote_cases = fetch_remote_snapshot(client, problem_id)
+        remote_cases = fetch_remote_sides(client, problem_id)
         testcase_plan = _testcase_plan(local, remote_cases, prune=prune)
     return _ProblemPlan(
         local,
@@ -656,17 +663,19 @@ def _execute_plan(
                         f"{label}: server reported different file names "
                         f"({', '.join(upload_response.file_names)})"
                     )
-        for name in testcases.stale:
-            _perform(
-                f"{prefix} delete testcase input {name}",
-                completed,
-                partial(plan.client.delete_testcase, problem_id, Which.IN, name),
-            )
-            _perform(
-                f"{prefix} delete testcase output {name}",
-                completed,
-                partial(plan.client.delete_testcase, problem_id, Which.OUT, name),
-            )
+        for name in sorted(set(testcases.stale_inputs) | set(testcases.stale_outputs)):
+            if name in testcases.stale_inputs:
+                _perform(
+                    f"{prefix} delete testcase input {name}",
+                    completed,
+                    partial(plan.client.delete_testcase, problem_id, Which.IN, name),
+                )
+            if name in testcases.stale_outputs:
+                _perform(
+                    f"{prefix} delete testcase output {name}",
+                    completed,
+                    partial(plan.client.delete_testcase, problem_id, Which.OUT, name),
+                )
 
         def refresh() -> None:
             if testcase_refresh_delay:
@@ -674,17 +683,12 @@ def _execute_plan(
             uploaded_input_names = {name for batch in testcases.input_batches for name in batch}
             uploaded_output_names = {name for batch in testcases.output_batches for name in batch}
             uploaded_names = uploaded_input_names | uploaded_output_names
-            normalized = fetch_remote_snapshot(plan.client, problem_id)
-            missing = uploaded_names - set(normalized)
-            if missing:
-                raise ValidationError(
-                    "server normalization response omitted uploaded testcases: "
-                    + ", ".join(sorted(missing))
-                )
+            normalized = fetch_remote_sides(plan.client, problem_id)
+            normalized_uploaded = normalized.require_complete(uploaded_names)
             refreshed = dict(testcases.local)
             for name in uploaded_names:
                 local_case = testcases.local[name]
-                normalized_case = normalized[name]
+                normalized_case = normalized_uploaded[name]
                 refreshed[name] = TestCaseData(
                     name,
                     (normalized_case.input if name in uploaded_input_names else local_case.input),
