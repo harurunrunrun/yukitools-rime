@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -74,6 +76,39 @@ def _path_id(value: int, label: str) -> int:
     return value
 
 
+def _normalize_base_url(base_url: str) -> tuple[str, str]:
+    if not isinstance(base_url, str):
+        raise ValueError("APIベースURLが不正です")
+    normalized = base_url.rstrip("/")
+    parsed = None
+    try:
+        parsed = urlsplit(normalized)
+        _ = parsed.port
+        httpx.URL(normalized)
+    except (TypeError, ValueError, httpx.InvalidURL):
+        parsed = None
+    if parsed is None:
+        raise ValueError("APIベースURLが不正です")
+    if parsed.scheme not in {"http", "https"} or parsed.hostname is None:
+        raise ValueError("APIベースURLはhttpまたはhttpsの絶対URLで指定してください")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("APIベースURLにユーザー情報は指定できません")
+    if parsed.query or parsed.fragment:
+        raise ValueError("APIベースURLにqueryまたはfragmentは指定できません")
+    return normalized, parsed.scheme
+
+
+def _poll_seconds(value: float, *, label: str, allow_zero: bool) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label}は有限の数値で指定してください")
+    normalized = float(value)
+    minimum_ok = normalized >= 0 if allow_zero else normalized > 0
+    if not math.isfinite(normalized) or not minimum_ok:
+        comparator = "0以上" if allow_zero else "0より大きい値"
+        raise ValueError(f"{label}は有限な{comparator}で指定してください")
+    return normalized
+
+
 def _which_value(which: Which | str) -> str:
     value = which.value if isinstance(which, Which) else which
     if value not in {"in", "out"}:
@@ -99,12 +134,16 @@ def _parse_write_response(
     operation: str,
     parser: Callable[[object], _ResponseT],
 ) -> _ResponseT:
+    error: ResponseFormatError | None = None
     try:
-        return parser(raw)
-    except ResponseFormatError as exc:
-        raise ResponseFormatError(
+        result = parser(raw)
+    except ResponseFormatError:
+        error = ResponseFormatError(
             f"{operation} のレスポンス形式が不正です。 サーバー側の適用結果は不明です。"
-        ) from exc
+        )
+    if error is not None:
+        raise error
+    return result
 
 
 class YukicoderClient:
@@ -142,30 +181,26 @@ class YukicoderClient:
         transport: httpx.BaseTransport | None,
         http_client: httpx.Client | None,
     ) -> None:
-        normalized = base_url.rstrip("/")
-        try:
-            parsed = httpx.URL(normalized)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("APIベースURLが不正です") from exc
-        if parsed.scheme not in {"http", "https"} or not parsed.host:
-            raise ValueError("APIベースURLはhttpまたはhttpsの絶対URLで指定してください")
-        if parsed.username or parsed.password:
-            raise ValueError("APIベースURLにユーザー情報は指定できません")
-        if parsed.query or parsed.fragment:
-            raise ValueError("APIベースURLにqueryまたはfragmentは指定できません")
-        if token is not None and parsed.scheme != "https":
+        normalized, scheme = _normalize_base_url(base_url)
+        if token is not None and scheme != "https":
             raise ValueError("認証付きAPI通信にはhttpsのベースURLが必要です")
         if http_client is not None and transport is not None:
             raise ValueError("http_client と transport は同時に指定できません")
         self.base_url = normalized
         self._token = token
         self._owns_client = http_client is None
-        self._http = http_client or httpx.Client(
-            timeout=timeout,
-            transport=transport,
-            headers={"User-Agent": USER_AGENT},
-            follow_redirects=False,
-        )
+        if http_client is None:
+            timeout_config = httpx.Timeout(timeout)
+            self._http = httpx.Client(
+                timeout=timeout_config,
+                transport=transport,
+                headers={"User-Agent": USER_AGENT},
+                follow_redirects=False,
+            )
+        else:
+            timeout_config = http_client.timeout
+            self._http = http_client
+        self._timeout = timeout_config
 
     def __enter__(self) -> YukicoderClient:
         return self
@@ -227,15 +262,30 @@ class YukicoderClient:
             headers["Content-Type"] = content_type
         if content_encoding:
             headers["Content-Encoding"] = content_encoding
+        request = httpx.Request(
+            method,
+            f"{self.base_url}{path}",
+            headers=headers,
+            content=content,
+            extensions={"timeout": self._timeout.as_dict()},
+        )
+        transport_error: YukicoderTransportError | None = None
+        response: httpx.Response | None = None
         try:
-            response = self._http.request(
-                method, f"{self.base_url}{path}", headers=headers, content=content
+            response = self._http.send(
+                request,
+                auth=None,
+                follow_redirects=False,
             )
         except httpx.HTTPError as exc:
             outcome = " サーバー側の適用結果は不明です。" if method.upper() != "GET" else ""
-            raise YukicoderTransportError(
-                f"{operation} のリクエストを送信できませんでした: {self._redact(str(exc))}{outcome}"
-            ) from exc
+            detail = self._redact(str(exc))
+            transport_error = YukicoderTransportError(
+                f"{operation} のリクエストを送信できませんでした: {detail}{outcome}"
+            )
+        if transport_error is not None:
+            raise transport_error
+        assert response is not None
         if allow_not_found and response.status_code == 404:
             return None
         if not response.is_success:
@@ -247,14 +297,18 @@ class YukicoderClient:
     ) -> object:
         if allow_empty and not response.content.strip():
             return {}
+        error: ResponseFormatError | None = None
         try:
-            return response.json()
-        except (json.JSONDecodeError, UnicodeError, ValueError) as exc:
+            result = response.json()
+        except (json.JSONDecodeError, UnicodeError, ValueError):
             text = self._redact(response.text.strip())[:4096]
             suffix = f": {text}" if text else ""
-            raise ResponseFormatError(
+            error = ResponseFormatError(
                 f"{operation} のレスポンスをJSONとして解釈できませんでした{suffix}"
-            ) from exc
+            )
+        if error is not None:
+            raise error
+        return result
 
     def _get_json(self, path: str, operation: str, *, authenticated: bool = True) -> object:
         response = self._request("GET", path, operation, authenticated=authenticated)
@@ -277,6 +331,7 @@ class YukicoderClient:
         return response
 
     def _put_json(self, path: str, request: object, operation: str) -> object:
+        serialization_error: ValueError | None = None
         try:
             raw = json.dumps(
                 _api_payload(request),
@@ -285,14 +340,23 @@ class YukicoderClient:
                 separators=(",", ":"),
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"{operation} のリクエストをJSONにできませんでした: {exc}") from exc
+            serialization_error = ValueError(
+                f"{operation} のリクエストをJSONにできませんでした: {self._redact(str(exc))}"
+            )
+        if serialization_error is not None:
+            raise serialization_error
         response = self._send_body("PUT", path, operation, raw, "application/json")
+        response_error: ResponseFormatError | None = None
         try:
-            return self._json_response(response, operation, allow_empty=True)
-        except ResponseFormatError as exc:
-            raise ResponseFormatError(
+            result = self._json_response(response, operation, allow_empty=True)
+        except ResponseFormatError:
+            response_error = ResponseFormatError(
                 f"{operation} のレスポンスJSONが不正です。 サーバー側の適用結果は不明です。"
-            ) from exc
+            )
+        if response_error is not None:
+            raise response_error
+
+        return result
 
     def get_problem_edit(self, problem_id: int) -> ProblemEditContent:
         pid = _path_id(problem_id, "問題ID")
@@ -366,8 +430,11 @@ class YukicoderClient:
         interval: float = 3.0,
         timeout: float = 180.0,
         sleep: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> JudgeCodeContent | None:
-        deadline = time.monotonic() + timeout
+        interval_seconds = _poll_seconds(interval, label="interval", allow_zero=False)
+        timeout_seconds = _poll_seconds(timeout, label="timeout", allow_zero=True)
+        deadline = monotonic() + timeout_seconds
         last_result: JudgeCodeContent | None = None
         while True:
             result = self.get_judge_code(problem_id)
@@ -375,10 +442,10 @@ class YukicoderClient:
                 last_result = result
             if result is not None and judge_status_is_final(result.status):
                 return result
-            remaining = deadline - time.monotonic()
+            remaining = deadline - monotonic()
             if remaining <= 0:
                 return last_result
-            sleep(min(interval, remaining))
+            sleep(min(interval_seconds, remaining))
 
     def get_editorial(self, problem_id: int) -> EditorialContent:
         pid = _path_id(problem_id, "問題ID")
@@ -405,10 +472,14 @@ class YukicoderClient:
         raw = self._get_json(f"/v1/problems/{pid}/file/{side}", "テストケース一覧の取得")
         if not isinstance(raw, list) or not all(isinstance(name, str) for name in raw):
             raise ResponseFormatError("テストケース一覧は文字列の配列ではありません")
+        names: list[str] | None = None
         try:
-            return [validate_testcase_name(name) for name in raw]
-        except ValueError as exc:
-            raise ResponseFormatError("テストケース一覧に安全でないファイル名があります") from exc
+            names = [validate_testcase_name(name) for name in raw]
+        except ValueError:
+            names = None
+        if names is None:
+            raise ResponseFormatError("テストケース一覧に安全でないファイル名があります")
+        return names
 
     def get_testcase(self, problem_id: int, which: Which | str, name: str) -> bytes:
         pid = _path_id(problem_id, "問題ID")
@@ -440,16 +511,19 @@ class YukicoderClient:
             raw,
             f"multipart/form-data; boundary={boundary}",
         )
+        result: UploadResponse | None = None
         try:
             result = UploadResponse.from_api_dict(
                 self._json_response(response, "テストケースのアップロード")
             )
             for name in result.file_names:
                 validate_testcase_name(name)
-        except (ResponseFormatError, ValueError) as exc:
+        except (ResponseFormatError, ValueError):
+            result = None
+        if result is None:
             raise ResponseFormatError(
                 "テストケースのアップロード応答が不正です。 サーバー側の適用結果は不明です。"
-            ) from exc
+            )
         return UploadResponse(result.file_names, self._redact(result.warning))
 
     def delete_testcase(self, problem_id: int, which: Which | str, name: str) -> None:
