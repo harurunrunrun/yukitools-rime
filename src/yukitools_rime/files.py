@@ -31,6 +31,14 @@ def discard_tree(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+def _discard_empty_directories(paths: list[Path]) -> None:
+    """Best-effort removal of directories created for an aborted operation."""
+
+    for path in paths:
+        with suppress(BaseException):
+            path.rmdir()
+
+
 def _prepare_directory_swap(
     parent: Path,
     name: str,
@@ -243,6 +251,11 @@ def replace_directory_snapshot(
 
     directory = Path(directory)
     parent = directory.parent
+    created_parents: list[Path] = []
+    candidate = parent
+    while not candidate.exists() and not candidate.is_symlink():
+        created_parents.append(candidate)
+        candidate = candidate.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)
         if parent.is_symlink() or not parent.is_dir():
@@ -258,15 +271,21 @@ def replace_directory_snapshot(
                 raise ValidationError(f"snapshot content for {name!r} must be bytes")
             validated[name] = content
     except (FileOperationError, ValidationError):
+        _discard_empty_directories(created_parents)
         raise
     except OSError as exc:
+        _discard_empty_directories(created_parents)
         raise FileOperationError(
             f"could not prepare snapshot {display_path(directory)}: {exc}"
         ) from exc
 
-    stage, backup = _prepare_directory_swap(
-        parent, directory.name, label=f"snapshot for {display_path(directory)}"
-    )
+    try:
+        stage, backup = _prepare_directory_swap(
+            parent, directory.name, label=f"snapshot for {display_path(directory)}"
+        )
+    except BaseException:
+        _discard_empty_directories(created_parents)
+        raise
     try:
         for name, content in validated.items():
             atomic_write_bytes(stage / name, content, create_parents=False)
@@ -300,6 +319,7 @@ def replace_directory_snapshot(
             discard_tree(stage)
         if backup.exists() and committed:
             discard_tree(backup)
+        _discard_empty_directories(created_parents)
 
 
 __all__ = [

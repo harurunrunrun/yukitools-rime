@@ -252,9 +252,7 @@ def init_project(path: str | Path) -> ProjectLayout:
     except OSError as exc:
         if created_root:
             _cleanup_created_project(requested, exc)
-        raise FileOperationError(
-            f"could not create project directory {requested}: {exc}"
-        ) from exc
+        raise FileOperationError(f"could not create project directory {requested}: {exc}") from exc
     if not root.is_dir():
         error = FileOperationError(f"project path is not a directory: {root}")
         if created_root:
@@ -408,17 +406,14 @@ def new_problem(
     if isinstance(problem_id, bool) or not isinstance(problem_id, int) or problem_id < 1:
         raise ValidationError("problem_id must be a positive integer")
     project = load_project(project_path)
-    reserved_output_names = {"problem", "tests", "statement.md", "statement.html"}
-    if project.config.rime_out_dir.casefold() in reserved_output_names:
-        raise ConflictError(
-            "rime_out_dir conflicts with a source path created by new: "
-            f"{project.config.rime_out_dir}"
-        )
     directory_name = str(problem_id) if dir_name is None else dir_name
     if directory_name.casefold() in _RESERVED_PROBLEM_DIRECTORY_NAMES:
         raise ValidationError(
             f"problem directory name is reserved by yukitools-rime: {directory_name}"
         )
+    lexical_target = project.root / directory_name
+    if lexical_target.is_symlink():
+        raise ConflictError(f"problem directory already exists: {lexical_target}")
     target = safe_child(project.root, directory_name, label="problem directory")
     if target.exists() or target.is_symlink():
         raise ConflictError(f"problem directory already exists: {target}")

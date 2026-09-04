@@ -465,14 +465,14 @@ def _restore_mutations(
                 remove_file(path, missing_ok=True)
             else:
                 atomic_write_bytes(path, previous)
-        except Exception as exc:  # pragma: no cover - catastrophic filesystem failure
+        except Exception as exc:
             rollback_error = rollback_error or exc
     for directory in sorted(created_dirs, key=lambda path: len(path.parts), reverse=True):
         try:
             directory.rmdir()
         except FileNotFoundError:
             pass
-        except OSError as exc:  # pragma: no cover - concurrent filesystem mutation
+        except OSError as exc:
             rollback_error = rollback_error or exc
     return rollback_error
 
