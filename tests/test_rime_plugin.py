@@ -467,3 +467,313 @@ def test_runtime_declarations_reject_source_symlinks(
 
     with pytest.raises(RuntimeError, match="direct regular file"):
         target.exports[declaration](**arguments)
+
+
+PROBLEM_ARGS: dict[str, object] = {
+    "problem_id": 10,
+    "title": "A",
+    "tags": "",
+    "level": 1,
+    "time_limit_ms": 1000,
+    "memory_limit": 256,
+    "eps_mode": "-",
+    "eps": "0",
+    "wip": False,
+    "recruiting_tester": False,
+    "problem_type": 0,
+    "judge_type": 0,
+    "rime_id": "A",
+}
+
+
+def test_public_dsl_wrappers_forward_defaults_to_active_handlers() -> None:
+    captured: dict[str, dict[str, object]] = {}
+
+    def capture(kind: str):
+        def handler(**kwargs: object) -> None:
+            captured[kind] = kwargs
+
+        return handler
+
+    rime_plugin._active.clear()
+    for kind in (
+        "yukicoder_problem",
+        "yukicoder_generator",
+        "yukicoder_judge",
+        "yukicoder_solution",
+    ):
+        rime_plugin._active[kind] = capture(kind)
+    try:
+        rime_plugin.yukicoder_problem(**PROBLEM_ARGS)  # type: ignore[arg-type]
+        rime_plugin.yukicoder_generator(lang_id="cpp", src="gen.cpp", test_case_num=1)
+        rime_plugin.yukicoder_judge(lang_id="cpp", src="judge.cpp")
+        rime_plugin.yukicoder_solution(lang_id="cpp", src="main.cpp")
+    finally:
+        rime_plugin._active.clear()
+
+    assert captured["yukicoder_problem"]["rime_options"] == {}
+    assert captured["yukicoder_generator"]["prefix"] is None
+    assert captured["yukicoder_generator"]["rime_options"] == {}
+    assert captured["yukicoder_judge"]["rime_options"] == {}
+    assert captured["yukicoder_solution"]["challenge_cases"] == ()
+    assert captured["yukicoder_solution"]["rime_options"] == {}
+
+
+def test_is_within_handles_incompatible_path_roots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_commonpath(paths: object) -> str:
+        raise ValueError("different drives")
+
+    monkeypatch.setattr(rime_plugin.os.path, "commonpath", fail_commonpath)
+    assert rime_plugin._is_within("C:\\root", "D:\\other") is False
+
+
+def test_regular_source_validation_accepts_missing_rime_metadata_and_valid_file(
+    tmp_path: Path,
+) -> None:
+    rime_plugin._validate_regular_source(SimpleNamespace(), "remote.txt")
+
+    source_dir = tmp_path / "problem" / "solution"
+    source_dir.mkdir(parents=True)
+    source = source_dir / "main.cpp"
+    source.write_text("code", encoding="utf-8")
+    target = SimpleNamespace(
+        src_dir=str(source_dir),
+        problem=SimpleNamespace(base_dir=str(tmp_path / "problem")),
+    )
+    rime_plugin._validate_regular_source(target, "main.cpp")
+
+
+def test_regular_source_validation_rejects_source_directory_escape(tmp_path: Path) -> None:
+    problem = tmp_path / "problem"
+    problem.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "main.cpp").write_text("code", encoding="utf-8")
+    target = SimpleNamespace(
+        src_dir=str(outside),
+        problem=SimpleNamespace(base_dir=str(problem)),
+    )
+
+    with pytest.raises(RuntimeError, match="source directory is unsafe"):
+        rime_plugin._validate_regular_source(target, "main.cpp")
+
+
+def test_problem_output_rejects_regular_file_and_synthetic_escape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    problem = tmp_path / "problem"
+    problem.mkdir()
+    output = problem / "rime-out"
+    output.write_bytes(b"file")
+
+    with pytest.raises(RuntimeError, match="must be a directory"):
+        rime_plugin._validated_problem_output(str(problem), ProjectConfig())
+
+    output.unlink()
+    monkeypatch.setattr(rime_plugin, "_is_within", lambda root, candidate: False)
+    with pytest.raises(RuntimeError, match="escapes problem root"):
+        rime_plugin._validated_problem_output(str(problem), ProjectConfig())
+
+
+def test_component_output_validation_handles_missing_file_and_escape(tmp_path: Path) -> None:
+    rime_plugin._validate_component_output(SimpleNamespace())
+
+    root = tmp_path / "out"
+    root.mkdir()
+    component = root / "tests"
+    component.write_bytes(b"file")
+    target = SimpleNamespace(
+        out_dir=str(component),
+        problem=SimpleNamespace(out_dir=str(root)),
+    )
+    with pytest.raises(RuntimeError, match="must be a directory"):
+        rime_plugin._validate_component_output(target)
+
+    outside = tmp_path / "outside"
+    target.out_dir = str(outside)
+    with pytest.raises(RuntimeError, match="unsafe"):
+        rime_plugin._validate_component_output(target)
+
+
+def test_register_code_rejects_missing_directive_and_reserved_solution_option() -> None:
+    generator = rime_plugin.GeneratorConfig("cpp", "gen.cpp", 1, rime_kind="cxx")
+    with pytest.raises(RuntimeError, match="not available"):
+        rime_plugin._register_code(SimpleNamespace(exports={}), generator, "generator")
+
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def directive(*args: object, **kwargs: object) -> None:
+        calls.append((args, kwargs))
+
+    solution = rime_plugin.SolutionConfig(
+        "cpp",
+        "main.cpp",
+        rime_kind="cxx",
+        challenge_cases=["sample"],
+        rime_options={"challenge_cases": ["bad"]},
+    )
+    with pytest.raises(RuntimeError, match="must not contain challenge_cases"):
+        rime_plugin._register_code(
+            SimpleNamespace(exports={"cxx_solution": directive}),
+            solution,
+            "solution",
+            solution=True,
+        )
+
+    solution = rime_plugin.SolutionConfig(
+        "cpp", "main.cpp", rime_kind="cxx", challenge_cases=["sample"]
+    )
+    rime_plugin._register_code(
+        SimpleNamespace(exports={"cxx_solution": directive}),
+        solution,
+        "solution",
+        solution=True,
+    )
+    assert calls == [(("main.cpp",), {"challenge_cases": ["sample"]})]
+
+
+def test_project_adapter_rejects_missing_and_duplicate_declarations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = installed(monkeypatch)
+    missing = registry.classes["Project"]()
+    missing.PreLoad(None)
+    with pytest.raises(RuntimeError, match="declaration is missing"):
+        missing.PostLoad(None)
+
+    duplicate = registry.classes["Project"]()
+    duplicate.PreLoad(None)
+    duplicate.exports["yukicoder_project"]()
+    with pytest.raises(RuntimeError, match="multiple"):
+        duplicate.exports["yukicoder_project"]()
+    duplicate.PostLoad(None)
+
+
+def test_problem_adapter_rejects_duplicate_and_rime_option_collisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = installed(monkeypatch)
+    target = registry.classes["Problem"]()
+    target.PreLoad(None)
+    target.exports["yukicoder_problem"](**PROBLEM_ARGS)
+    with pytest.raises(RuntimeError, match="multiple"):
+        target.exports["yukicoder_problem"](**PROBLEM_ARGS)
+    target.PostLoad(None)
+
+    target = registry.classes["Problem"]()
+    target.PreLoad(None)
+    conflicting = dict(PROBLEM_ARGS)
+    conflicting["rime_options"] = {"time_limit": 2}
+    with pytest.raises(RuntimeError, match="conflicts"):
+        target.exports["yukicoder_problem"](**conflicting)
+    target.PostLoad(None)
+
+
+def test_problem_postload_removes_sync_only_solutions_and_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = installed(monkeypatch)
+    target = registry.classes["Problem"]()
+    target.PreLoad(None)
+    target.yukicoder_config = object()
+    sync_only = SimpleNamespace(yukicoder_sync_only=True)
+    normal = SimpleNamespace(yukicoder_sync_only=False)
+    target.solutions = [sync_only, normal]
+    target.reference_solution = sync_only
+    errors: list[tuple[object, str]] = []
+    ui = SimpleNamespace(
+        errors=SimpleNamespace(Error=lambda owner, message: errors.append((owner, message)))
+    )
+
+    target.PostLoad(ui)
+
+    assert target.solutions == [normal]
+    assert target.reference_solution is None
+    assert errors and "sync-only" in errors[0][1]
+
+
+def test_problem_postload_without_solution_list_is_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = installed(monkeypatch)
+    target = registry.classes["Problem"]()
+    target.PreLoad(None)
+    target.yukicoder_config = object()
+    target.PostLoad(None)
+
+
+def test_testset_rejects_duplicates_and_shared_source_in_both_orders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = installed(monkeypatch)
+    target = registry.classes["Testset"]()
+    target.problem = SimpleNamespace(judge_type=1)
+    target.PreLoad(None)
+    target.exports["yukicoder_generator"](
+        lang_id="cpp", src="same.cpp", test_case_num=1, rime_kind="cxx"
+    )
+    with pytest.raises(RuntimeError, match="multiple"):
+        target.exports["yukicoder_generator"](
+            lang_id="cpp", src="other.cpp", test_case_num=1, rime_kind="cxx"
+        )
+    with pytest.raises(RuntimeError, match="must be distinct"):
+        target.exports["yukicoder_judge"](lang_id="cpp", src="same.cpp", rime_kind="cxx")
+    target.PostLoad(None)
+
+    target = registry.classes["Testset"]()
+    target.problem = SimpleNamespace(judge_type=1)
+    target.PreLoad(None)
+    target.exports["yukicoder_judge"](lang_id="cpp", src="same.cpp", rime_kind="cxx")
+    with pytest.raises(RuntimeError, match="multiple"):
+        target.exports["yukicoder_judge"](lang_id="cpp", src="other.cpp", rime_kind="cxx")
+    with pytest.raises(RuntimeError, match="must be distinct"):
+        target.exports["yukicoder_generator"](
+            lang_id="cpp", src="same.cpp", test_case_num=1, rime_kind="cxx"
+        )
+    target.PostLoad(None)
+
+
+def test_solution_duplicate_sync_challenges_and_normal_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(Solution, "IsCorrect", lambda self: True, raising=False)
+    registry = installed(monkeypatch)
+
+    sync_only = registry.classes["Solution"]()
+    sync_only._codes = []
+    sync_only.PreLoad(None)
+    sync_only.exports["yukicoder_solution"](
+        lang_id="remote", src="main.txt", rime_kind=None, challenge_cases=["sample"]
+    )
+    with pytest.raises(RuntimeError, match="multiple"):
+        sync_only.exports["yukicoder_solution"](lang_id="remote", src="other.txt", rime_kind=None)
+    sync_only.PostLoad(None)
+    assert sync_only.challenge_cases == ["sample"]
+    assert sync_only.IsCorrect() is False
+
+    normal = registry.classes["Solution"]()
+    normal.PreLoad(None)
+    normal.yukicoder_sync_only = False
+    assert normal.IsCorrect() is True
+    normal.PostLoad(None)
+
+
+def test_install_rejects_missing_basic_registry_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = Registry()
+    del registry.classes["Solution"]
+    monkeypatch.setattr(
+        rime_plugin.importlib,
+        "import_module",
+        lambda name: SimpleNamespace(
+            registry=registry,
+            ReloadConfiguration=ReloadConfiguration,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match=r"load rime\.basic first"):
+        rime_plugin.install()
