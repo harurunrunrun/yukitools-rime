@@ -14,6 +14,7 @@ from yukitools_rime.api import (
     GeneratorContent,
     JudgeCodeContent,
     ProblemEditContent,
+    ValidatorContent,
     YukicoderClient,
 )
 from yukitools_rime.auth import resolve_token
@@ -40,6 +41,7 @@ from yukitools_rime.models import (
     ProblemSettings,
     ProjectConfig,
     Statement,
+    ValidatorConfig,
 )
 from yukitools_rime.rime_config import (
     BEGIN_MARKER,
@@ -92,6 +94,8 @@ class ScaffoldClient(Protocol):
     def get_generator(self, problem_id: int) -> GeneratorContent: ...
 
     def get_judge_code(self, problem_id: int) -> JudgeCodeContent | None: ...
+
+    def get_validator(self, problem_id: int) -> ValidatorContent: ...
 
 
 ClientFactory = Callable[[Path, ProjectConfig, int], ScaffoldClient]
@@ -267,6 +271,18 @@ def init_project(path: str | Path) -> ProjectLayout:
         raise
 
 
+def _get_validator(client: ScaffoldClient, problem_id: int) -> ValidatorContent:
+    """Fetch validator data while tolerating older injected test clients."""
+
+    getter = getattr(client, "get_validator", None)
+    if getter is None:
+        return ValidatorContent()
+    result = getter(problem_id)
+    if not isinstance(result, ValidatorContent):
+        raise ValidationError("validator API returned an unexpected response type")
+    return result
+
+
 def _problem_resources(
     problem_id: int,
     directory_name: str,
@@ -280,6 +296,8 @@ def _problem_resources(
     GeneratorConfig | None,
     str | None,
     JudgeConfig | None,
+    str | None,
+    ValidatorConfig | None,
     str | None,
     TestcaseSnapshot | None,
 ]:
@@ -333,6 +351,18 @@ def _problem_resources(
             )
             judge_source = remote_judge.source
 
+    remote_validator = _get_validator(client, problem_id)
+    validator: ValidatorConfig | None = None
+    validator_source: str | None = None
+    if remote_validator.source.strip():
+        spec = source_spec(remote_validator.lang_id)
+        validator = ValidatorConfig(
+            lang_id=remote_validator.lang_id,
+            src=f"validator.{spec.extension}",
+            rime_kind=spec.rime_kind,
+        )
+        validator_source = remote_validator.source
+
     if include_testcases:
         if testcase_stage is None:
             raise ValueError("testcase staging is required when fetching testcases")
@@ -346,6 +376,8 @@ def _problem_resources(
         generator_source,
         judge,
         judge_source,
+        validator,
+        validator_source,
         testcases,
     )
 
@@ -364,6 +396,8 @@ def _write_problem_stage(
     generator_source: str | None,
     judge: JudgeConfig | None,
     judge_source: str | None,
+    validator: ValidatorConfig | None,
+    validator_source: str | None,
     testcases: TestcaseSnapshot | None,
     project_config: ProjectConfig,
 ) -> None:
@@ -371,12 +405,14 @@ def _write_problem_stage(
     tests.mkdir()
     write_config_atomic(
         tests / "TESTSET",
-        render_testset_block(TestsetConfig(generator=generator, judge=judge)),
+        render_testset_block(TestsetConfig(generator=generator, judge=judge, validator=validator)),
     )
     if generator is not None and generator_source is not None:
         atomic_write_text(tests / generator.src, generator_source, create_parents=False)
     if judge is not None and judge_source is not None:
         atomic_write_text(tests / judge.src, judge_source, create_parents=False)
+    if validator is not None and validator_source is not None:
+        atomic_write_text(tests / validator.src, validator_source, create_parents=False)
     atomic_write_text(
         stage / f"statement{statement.suffix}",
         statement.text,

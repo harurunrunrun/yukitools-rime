@@ -12,6 +12,7 @@ from yukitools_rime.api.types import (
     GeneratorContent,
     JudgeCodeContent,
     ProblemEditContent,
+    ValidatorContent,
 )
 from yukitools_rime.commands import sync
 from yukitools_rime.errors import FileOperationError, ValidationError
@@ -22,6 +23,7 @@ from yukitools_rime.models import (
     ProblemConfig,
     ProblemSettings,
     ProjectConfig,
+    ValidatorConfig,
     Which,
 )
 from yukitools_rime.rime_config import (
@@ -31,6 +33,7 @@ from yukitools_rime.rime_config import (
     render_project_block,
     render_testset_block,
 )
+from yukitools_rime.testcase_sync import DEFAULT_SERVER_CASE_CHARS
 
 
 def settings(title: str = "local", *, limit: int = 1000) -> ProblemSettings:
@@ -145,6 +148,15 @@ class FakeClient:
 
     def delete_testcase(self, problem_id: int, which: Which | str, name: str) -> None:
         raise AssertionError("pull/diff never deletes")
+
+
+@dataclass
+class ValidatorClient(FakeClient):
+    validator: ValidatorContent = field(default_factory=ValidatorContent)
+
+    def get_validator(self, problem_id: int) -> ValidatorContent:
+        self.record("validator")
+        return self.validator
 
 
 def client(
@@ -467,6 +479,21 @@ def test_diff_is_structured_and_strictly_read_only(tmp_path: Path) -> None:
     assert file_snapshot(tmp_path) == before
 
 
+def test_diff_rejects_local_name_that_server_would_rewrite(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    problem = project.problems[0].path
+    directory = write_local_case(problem, "case-1", b"input", b"output")
+    (directory / "case-1.diff").unlink()
+    remote: Any = client()
+    remote.testcase_name_rule = lambda: DEFAULT_SERVER_CASE_CHARS.replace("-", "")
+
+    with pytest.raises(ValidationError, match="would be stored"):
+        sync.diff_remote(project, factory(remote), include_testcases=True)
+    assert "list-in" not in remote.calls
+
+
 def test_pull_rolls_back_regular_files_when_testcase_swap_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -618,4 +645,108 @@ def test_pull_real_write_failure_restores_earlier_writes(
         sync.pull(project, factory(remote))
 
     assert calls >= 4
+    assert file_snapshot(tmp_path) == before
+
+
+def configure_validator(project: ProjectLayout, source: str = "old validator\n") -> Path:
+    problem = project.problems[0]
+    assert problem.testset is not None
+    config = parse_testset_config(problem.testset.config_path.read_text(encoding="utf-8"))
+    config.validator = ValidatorConfig(
+        "cpp17",
+        "custom-validator.cpp",
+        "cxx",
+        {"flags": ["-Wall"]},
+    )
+    problem.testset.config_path.write_text(render_testset_block(config), encoding="utf-8")
+    source_path = problem.testset.path / "custom-validator.cpp"
+    source_path.write_text(source, encoding="utf-8")
+    return source_path
+
+
+def validator_client(content: ValidatorContent) -> ValidatorClient:
+    return ValidatorClient(
+        edit=ProblemEditContent(
+            1,
+            "old statement\n",
+            True,
+            True,
+            settings(),
+        ),
+        generator=GeneratorContent("cpp17", "old generator\n", True, 2),
+        judge=JudgeCodeContent("cpp17", "old judge\n", "AC"),
+        validator=content,
+    )
+
+
+def test_pull_validator_preserves_local_runtime_fields_and_source_name(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    source_path = configure_validator(project)
+    remote = validator_client(
+        ValidatorContent(
+            lang_id="python3",
+            source="print('validate')\r\n",
+            status="AC",
+            cases=(),
+        )
+    )
+
+    result = sync.pull(project, factory(remote))
+
+    assert not any("remote validator" in warning for warning in result.warnings)
+    testset = project.problems[0].testset
+    assert testset is not None
+    config = parse_testset_config(testset.config_path.read_text(encoding="utf-8"))
+    assert config.validator == ValidatorConfig(
+        "python3",
+        "custom-validator.cpp",
+        "cxx",
+        {"flags": ["-Wall"]},
+    )
+    assert source_path.read_bytes() == b"print('validate')\n"
+    assert remote.calls == ["edit", "generator", "judge", "validator", "editorial"]
+
+
+def test_pull_unregistered_validator_keeps_existing_local_declaration(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    source_path = configure_validator(project)
+    testset = project.problems[0].testset
+    assert testset is not None
+    config_before = testset.config_path.read_bytes()
+    remote = validator_client(ValidatorContent())
+
+    result = sync.pull(project, factory(remote))
+
+    assert any("remote validator is unavailable or empty" in item for item in result.warnings)
+    assert testset.config_path.read_bytes() == config_before
+    assert source_path.read_text(encoding="utf-8") == "old validator\n"
+
+
+def test_diff_reports_validator_language_and_source_without_mutation(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    configure_validator(project)
+    before = file_snapshot(tmp_path)
+    remote = validator_client(
+        ValidatorContent(
+            lang_id="python3",
+            source="different validator\n",
+            status="AC",
+            cases=(),
+        )
+    )
+
+    result = sync.diff_remote(project, factory(remote))
+
+    entries = result.problems[0].entries
+    assert any(entry.resource == "validator.lang_id" for entry in entries)
+    source_entries = [entry for entry in entries if entry.resource == "validator"]
+    assert len(source_entries) == 1
+    assert source_entries[0].detail == "source differs"
+    assert source_entries[0].unified
     assert file_snapshot(tmp_path) == before

@@ -62,7 +62,7 @@ class RimeTestset(Base):
     def PreLoad(self, ui: object) -> None:
         super().PreLoad(ui)
         for kind in ("c", "cxx", "java", "kotlin", "rust", "go", "script"):
-            for suffix in ("generator", "judge"):
+            for suffix in ("generator", "judge", "validator"):
                 name = f"{kind}_{suffix}"
 
                 def directive(*args: Any, _name: str = name, **kwargs: Any) -> None:
@@ -162,7 +162,16 @@ def test_program_wrappers_delegate_by_rime_kind(monkeypatch: pytest.MonkeyPatch)
         src="judge.cpp",
         rime_kind=None,
     )
-    assert testset.calls == [("cxx_generator", ("gen.cpp",), {"flags": ["-O2"]})]
+    testset.exports["yukicoder_validator"](
+        lang_id="cpp20",
+        src="validator.cpp",
+        rime_kind="cxx",
+        rime_options={"flags": ["-Wall"]},
+    )
+    assert testset.calls == [
+        ("cxx_generator", ("gen.cpp",), {"flags": ["-O2"]}),
+        ("cxx_validator", ("validator.cpp",), {"flags": ["-Wall"]}),
+    ]
     solution = registry.classes["Solution"]()
     solution.PreLoad(None)
     solution.exports["yukicoder_solution"](
@@ -188,6 +197,20 @@ def test_normal_judge_source_is_sync_only(monkeypatch: pytest.MonkeyPatch) -> No
 
     assert testset.calls == []
     assert testset.yukicoder_judge_config.src == "judge.cpp"
+
+
+def test_unknown_validator_kind_is_loaded_for_sync_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = installed(monkeypatch)
+    testset = registry.classes["Testset"]()
+    testset.problem = SimpleNamespace(judge_type=0)
+    testset.PreLoad(None)
+    testset.exports["yukicoder_validator"](
+        lang_id="remote-only", src="validator.txt", rime_kind=None
+    )
+    assert testset.calls == []
+    assert testset.yukicoder_validator_config.src == "validator.txt"
 
 
 def test_sync_only_judge_rejects_custom_problem_execution(
@@ -265,9 +288,15 @@ def test_every_supported_rime_kind_is_delegated(monkeypatch: pytest.MonkeyPatch,
         src="judge.src",
         rime_kind=kind,
     )
+    testset.exports["yukicoder_validator"](
+        lang_id="remote",
+        src="validator.src",
+        rime_kind=kind,
+    )
     assert [call[0] for call in testset.calls] == [
         f"{kind}_generator",
         f"{kind}_judge",
+        f"{kind}_validator",
     ]
 
     solution = registry.classes["Solution"]()

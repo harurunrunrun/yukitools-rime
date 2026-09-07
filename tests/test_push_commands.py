@@ -17,13 +17,18 @@ from yukitools_rime.api.types import (
     ProblemEditContent,
     ProblemEditRequest,
     SaveResponse,
+    StatusInfo,
     UploadResponse,
+    ValidatorCase,
+    ValidatorContent,
+    ValidatorRequest,
 )
 from yukitools_rime.commands import push as push_module
 from yukitools_rime.commands.push import (
     JudgeCompileError,
     PushExecutionError,
     PushInterrupted,
+    ValidatorValidationError,
     push,
 )
 from yukitools_rime.errors import LayoutError, UsageError, ValidationError
@@ -34,6 +39,7 @@ from yukitools_rime.models import (
     ProblemConfig,
     ProblemSettings,
     ProjectConfig,
+    ValidatorConfig,
     Which,
 )
 from yukitools_rime.rime_config import (
@@ -193,6 +199,13 @@ class FakeClient:
             self.save_judge_status,
         )
         return JudgeCodeSaveResponse("saved", self.save_judge_status)
+
+    def statuses(self) -> list[StatusInfo]:
+        self.record("statuses")
+        return [
+            StatusInfo("WJ", "judging"),
+            StatusInfo("Judge", "judging"),
+        ]
 
     def get_editorial(self, problem_id: int) -> EditorialContent:
         self.record("get-editorial")
@@ -806,10 +819,7 @@ def test_partial_prune_reports_completed_side_and_retry_deletes_remaining_side(
         call for call in client.calls[before:] if call.startswith(("upload-", "delete-"))
     ]
     assert retry_writes == ["delete-out-stale"]
-    assert result.planned_items == (
-        "problem 1 delete testcase output stale",
-        "problem 1 testcase normalization refresh",
-    )
+    assert result.planned_items == ("problem 1 delete testcase output stale",)
 
 
 def test_testcase_refresh_tolerates_unrelated_incomplete_remote_case(
@@ -860,7 +870,285 @@ def test_dry_run_prunes_only_existing_remote_sides(tmp_path: Path) -> None:
     assert result.planned_items == (
         "problem 1 delete testcase input input_only",
         "problem 1 delete testcase output output_only",
-        "problem 1 testcase normalization refresh",
     )
     assert ("in", "input_only") in client.cases
     assert ("out", "output_only") in client.cases
+
+
+class ValidatorClient(FakeClient):
+    def __init__(
+        self,
+        remote: ValidatorContent,
+        *,
+        polls: list[ValidatorContent] | None = None,
+        judging: tuple[str, ...] = ("Pending",),
+        judge_compile_message: str = "",
+    ) -> None:
+        super().__init__()
+        self.validator = remote
+        self.validator_polls = list(polls or [])
+        self.validator_requests: list[ValidatorRequest] = []
+        self.validator_saved = False
+        self.judging = judging
+        self.judge_compile_message = judge_compile_message
+
+    def statuses(self) -> list[StatusInfo]:
+        self.record("statuses")
+        return [StatusInfo(status, "judging") for status in self.judging]
+
+    def get_validator(self, problem_id: int) -> ValidatorContent:
+        self.record("get-validator")
+        if self.validator_saved and self.validator_polls:
+            self.validator = self.validator_polls.pop(0)
+        return self.validator
+
+    def save_validator(
+        self,
+        problem_id: int,
+        request: ValidatorRequest,
+    ) -> JudgeCodeSaveResponse:
+        self.record("save-validator")
+        self.validator_requests.append(request)
+        self.validator_saved = True
+        self.validator = ValidatorContent(
+            lang_id=request.lang_id,
+            source=request.source,
+            status="Pending",
+        )
+        return JudgeCodeSaveResponse("saved", "Pending")
+
+    def get_judge_code(self, problem_id: int) -> JudgeCodeContent | None:
+        code = super().get_judge_code(problem_id)
+        if code is None:
+            return None
+        return JudgeCodeContent(
+            code.lang_id,
+            code.source,
+            code.status,
+            self.judge_compile_message,
+        )
+
+
+def add_local_validator(project: ProjectLayout, source: str) -> None:
+    problem = project.problems[0]
+    tests = problem.path / "tests"
+    config = RimeTestsetConfig(
+        GeneratorConfig("cpp17", "generator.cpp", 2, "case", "cxx"),
+        JudgeConfig("cpp17", "judge.cpp", "cxx"),
+        ValidatorConfig("cpp17", "validator.cpp", "cxx", {"flags": ["-Wall"]}),
+    )
+    (tests / "TESTSET").write_text(render_testset_block(config), encoding="utf-8")
+    (tests / "validator.cpp").write_text(source, encoding="utf-8")
+
+
+def test_validator_push_follows_testcase_refresh_and_polls_every_five_seconds(
+    tmp_path: Path,
+) -> None:
+    project = make_project(tmp_path)
+    add_local_validator(project, "new validator\n")
+    write_case(project.problems[0], "sample", b"input", b"output")
+    clock = FakeClock()
+    client = ValidatorClient(
+        ValidatorContent("cpp17", "old validator\n", "AC"),
+        polls=[ValidatorContent("cpp17", "new validator\n", "AC", cases=())],
+    )
+
+    result = push(
+        project,
+        factory({1: client}),
+        include_testcases=True,
+        testcase_refresh_delay=0,
+        sleep=clock.sleep,
+        monotonic=clock.now,
+    )
+
+    assert result.planned_items[-1] == "problem 1 validator"
+    assert result.completed_items[-1] == "problem 1 validator"
+    assert client.validator_requests == [ValidatorRequest("cpp17", "new validator\n")]
+    assert client.calls.index("save-validator") > max(
+        index for index, call in enumerate(client.calls) if call.startswith("get-out-")
+    )
+    assert client.calls.count("statuses") == 1
+    assert clock.sleeps == [5.0]
+
+
+def test_unchanged_ac_validator_skips_put_and_poll(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    add_local_validator(project, "same validator\n")
+    clock = FakeClock()
+    client = ValidatorClient(
+        ValidatorContent("cpp17", "same validator\n", "AC", cases=()),
+    )
+
+    result = push(
+        project,
+        factory({1: client}),
+        sleep=clock.sleep,
+        monotonic=clock.now,
+    )
+
+    assert result.planned_items == ()
+    assert client.validator_requests == []
+    assert client.calls.count("get-validator") == 1
+    assert clock.sleeps == []
+
+
+def test_validator_no_wait_saves_without_polling(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    add_local_validator(project, "new validator\n")
+    client = ValidatorClient(
+        ValidatorContent("cpp17", "old validator\n", "AC"),
+        polls=[ValidatorContent("cpp17", "new validator\n", "AC", cases=())],
+    )
+
+    result = push(project, factory({1: client}), no_wait_compile=True)
+
+    assert client.validator_requests == [ValidatorRequest("cpp17", "new validator\n")]
+    assert client.calls.count("get-validator") == 1
+    assert any("validator validation was not awaited" in item for item in result.warnings)
+
+
+def test_validator_terminal_failure_reports_case_details(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    add_local_validator(project, "new validator\n")
+    clock = FakeClock()
+    client = ValidatorClient(
+        ValidatorContent("cpp17", "old validator\n", "AC"),
+        polls=[
+            ValidatorContent(
+                "cpp17",
+                "new validator\n",
+                "WA",
+                cases=(ValidatorCase("sample-01", "WA"),),
+            )
+        ],
+    )
+
+    with pytest.raises(PushExecutionError) as caught:
+        push(
+            project,
+            factory({1: client}),
+            sleep=clock.sleep,
+            monotonic=clock.now,
+        )
+
+    assert isinstance(caught.value.cause, ValidatorValidationError)
+    assert "sample-01 (WA)" in str(caught.value.cause)
+    assert caught.value.completed_items == ("problem 1 validator",)
+
+
+def test_empty_validator_source_deletes_without_waiting(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    add_local_validator(project, " \n")
+    clock = FakeClock()
+    client = ValidatorClient(
+        ValidatorContent("cpp17", "remote validator\n", "AC", cases=()),
+    )
+
+    result = push(
+        project,
+        factory({1: client}),
+        sleep=clock.sleep,
+        monotonic=clock.now,
+    )
+
+    assert result.completed_items == ("problem 1 validator",)
+    assert client.validator_requests == [ValidatorRequest("cpp17", "")]
+    assert "statuses" not in client.calls
+    assert clock.sleeps == []
+
+
+def test_judge_wait_uses_server_judging_categories(tmp_path: Path) -> None:
+    project = changed_judge_project(tmp_path)
+    clock = FakeClock()
+    client = ValidatorClient(
+        ValidatorContent(),
+        judging=("CompileQueue",),
+    )
+    client.save_judge_status = "CompileQueue"
+    client.poll_statuses = ["AC"]
+
+    result = push(
+        project,
+        factory({1: client}),
+        sleep=clock.sleep,
+        monotonic=clock.now,
+    )
+
+    assert result.warnings == ()
+    assert clock.sleeps == [3.0]
+
+
+def test_judge_terminal_status_includes_compile_message(tmp_path: Path) -> None:
+    project = changed_judge_project(tmp_path)
+    clock = FakeClock()
+    client = ValidatorClient(
+        ValidatorContent(),
+        judging=("CompileQueue",),
+        judge_compile_message="compiler rejected the source",
+    )
+    client.save_judge_status = "CompileQueue"
+    client.poll_statuses = ["Rejected"]
+
+    with pytest.raises(PushExecutionError) as caught:
+        push(
+            project,
+            factory({1: client}),
+            sleep=clock.sleep,
+            monotonic=clock.now,
+        )
+
+    assert isinstance(caught.value.cause, JudgeCompileError)
+    assert "Rejected" in str(caught.value.cause)
+    assert "compiler rejected the source" in str(caught.value.cause)
+
+
+def test_validator_timeout_uses_six_hundred_second_budget(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    add_local_validator(project, "new validator\n")
+    clock = FakeClock()
+    client = ValidatorClient(
+        ValidatorContent("cpp17", "old validator\n", "AC"),
+    )
+
+    result = push(
+        project,
+        factory({1: client}),
+        judge_timeout=1,
+        judge_poll_interval=0.25,
+        sleep=clock.sleep,
+        monotonic=clock.now,
+    )
+
+    assert any("validator validation timed out" in item for item in result.warnings)
+    assert len(clock.sleeps) == 120
+    assert set(clock.sleeps) == {5.0}
+    assert sum(clock.sleeps) == 600.0
+
+
+def test_validator_compile_failure_includes_compile_message(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    add_local_validator(project, "new validator\n")
+    clock = FakeClock()
+    client = ValidatorClient(
+        ValidatorContent("cpp17", "old validator\n", "AC"),
+        polls=[
+            ValidatorContent(
+                "cpp17",
+                "new validator\n",
+                "CE",
+                compile_message="validator compiler error",
+            )
+        ],
+    )
+
+    with pytest.raises(PushExecutionError) as caught:
+        push(
+            project,
+            factory({1: client}),
+            sleep=clock.sleep,
+            monotonic=clock.now,
+        )
+
+    assert isinstance(caught.value.cause, ValidatorValidationError)
+    assert "validator compiler error" in str(caught.value.cause)

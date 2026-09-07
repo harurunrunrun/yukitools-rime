@@ -9,7 +9,7 @@ from typing import Protocol, cast
 
 from yukitools_rime.api.client import DEFAULT_BASE_URL, YukicoderClient
 from yukitools_rime.api.types import Language
-from yukitools_rime.errors import ValidationError
+from yukitools_rime.errors import LayoutError, ValidationError
 from yukitools_rime.layout import ProblemLayout, ProjectLayout, TargetSelection
 from yukitools_rime.models import Which, validate_testcase_name
 
@@ -72,9 +72,15 @@ def _selected_problems(
     target: ProjectLayout | TargetSelection,
 ) -> tuple[ProblemLayout, ...]:
     if isinstance(target, ProjectLayout):
-        return target.problems
+        if not target.problems:
+            raise LayoutError("testcases target contains no managed problems")
+        return target.sync_problems
     if isinstance(target, TargetSelection):
-        return target.problems
+        if target.problems:
+            return target.problems
+        if target.project.problems and target.target == target.project.root:
+            return ()
+        raise LayoutError("testcases target contains no managed problems")
     raise TypeError("target must be ProjectLayout or TargetSelection")
 
 

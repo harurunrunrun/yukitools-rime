@@ -13,6 +13,7 @@ from yukitools_rime.api.types import (
     JudgeCodeRequest,
     JudgeCodeSaveResponse,
     ProblemEditContent,
+    StatusInfo,
 )
 from yukitools_rime.commands import push as push_module
 from yukitools_rime.commands.push import PushInterrupted
@@ -105,6 +106,9 @@ class PlanClient:
 
     def get_judge_code(self, _problem_id: int) -> object:
         return self.judge
+
+    def statuses(self) -> list[StatusInfo]:
+        return [StatusInfo("WJ", "judging")]
 
     def get_editorial(self, _problem_id: int) -> object:
         return self.editorial
@@ -332,6 +336,7 @@ def test_execute_judge_wait_keyboard_interrupt_reports_saved_judge(
         JudgeCodeRequest("cpp17", "judge\n"),
         None,
         None,
+        judge_judging=frozenset({"WJ"}),
     )
 
     def interrupt(_seconds: float) -> None:
@@ -372,7 +377,7 @@ def test_execute_nonstandard_upload_responses_and_side_specific_prune(
     monkeypatch.setattr(
         push_module,
         "fetch_remote_sides",
-        lambda _client, _problem_id: RemoteTestcaseSides(
+        lambda _client, _problem_id, **_kwargs: RemoteTestcaseSides(
             {"sample": b"input"},
             {"sample": b"output"},
         ),

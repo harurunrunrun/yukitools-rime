@@ -118,6 +118,11 @@ class ProjectLayout:
     def config_path(self) -> Path:
         return self.root / "PROJECT"
 
+    @property
+    def sync_problems(self) -> tuple[ProblemLayout, ...]:
+        """Problems selected by project-wide synchronization commands."""
+        return tuple(problem for problem in self.problems if problem.config.sync)
+
     def problem_by_id(self, problem_id: int) -> ProblemLayout:
         for problem in self.problems:
             if problem.problem_id == problem_id:
@@ -264,7 +269,7 @@ def resolve_target(
     if not _contained(resolved_target, loaded.root):
         raise LayoutError(f"target escapes project root {loaded.root}: {resolved_target}")
     if resolved_target == loaded.root:
-        return TargetSelection(loaded, loaded.problems, resolved_target)
+        return TargetSelection(loaded, loaded.sync_problems, resolved_target)
     matches = tuple(
         problem for problem in loaded.problems if _contained(resolved_target, problem.path)
     )

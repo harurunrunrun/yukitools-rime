@@ -18,6 +18,7 @@ from yukitools_rime.models import (
     ProblemSettings,
     ProjectConfig,
     SolutionConfig,
+    ValidatorConfig,
 )
 
 _Handler = Callable[..., None]
@@ -59,6 +60,7 @@ def yukicoder_problem(
     rime_id: str,
     reference_solution: str | None = None,
     rime_options: dict[str, object] | None = None,
+    sync: bool = True,
 ) -> None:
     _invoke(
         "yukicoder_problem",
@@ -81,6 +83,7 @@ def yukicoder_problem(
         rime_id=rime_id,
         reference_solution=reference_solution,
         rime_options={} if rime_options is None else rime_options,
+        sync=sync,
     )
 
 
@@ -113,6 +116,22 @@ def yukicoder_judge(
 ) -> None:
     _invoke(
         "yukicoder_judge",
+        lang_id=lang_id,
+        src=src,
+        rime_kind=rime_kind,
+        rime_options={} if rime_options is None else rime_options,
+    )
+
+
+def yukicoder_validator(
+    *,
+    lang_id: str,
+    src: str,
+    rime_kind: str | None = None,
+    rime_options: dict[str, object] | None = None,
+) -> None:
+    _invoke(
+        "yukicoder_validator",
         lang_id=lang_id,
         src=src,
         rime_kind=rime_kind,
@@ -345,30 +364,34 @@ def _testset_adapter(base: type[Any]) -> type[Any]:
             _validate_component_output(self)
             self.yukicoder_generator_config = None
             self.yukicoder_judge_config = None
+            self.yukicoder_validator_config = None
+
+            def ensure_distinct(name: str, src: str) -> None:
+                for other_name, other in (
+                    ("generator", self.yukicoder_generator_config),
+                    ("judge", self.yukicoder_judge_config),
+                    ("validator", self.yukicoder_validator_config),
+                ):
+                    if (
+                        other is not None
+                        and other_name != name
+                        and other.src.casefold() == src.casefold()
+                    ):
+                        raise RuntimeError(f"{name} and {other_name} source files must be distinct")
 
             def generator(**kwargs: object) -> None:
                 if self.yukicoder_generator_config is not None:
                     raise RuntimeError("multiple yukicoder_generator() declarations")
                 config = GeneratorConfig(**kwargs)  # type: ignore[arg-type]
-                judge_config = self.yukicoder_judge_config
-                if (
-                    judge_config is not None
-                    and judge_config.src.casefold() == config.src.casefold()
-                ):
-                    raise RuntimeError("generator and judge source files must be distinct")
+                ensure_distinct("generator", config.src)
                 _register_code(self, config, "generator")
                 self.yukicoder_generator_config = config
 
             def judge(**kwargs: object) -> None:
                 if self.yukicoder_judge_config is not None:
                     raise RuntimeError("multiple yukicoder_judge() declarations")
-                generator_config = self.yukicoder_generator_config
                 config = JudgeConfig(**kwargs)  # type: ignore[arg-type]
-                if (
-                    generator_config is not None
-                    and generator_config.src.casefold() == config.src.casefold()
-                ):
-                    raise RuntimeError("generator and judge source files must be distinct")
+                ensure_distinct("judge", config.src)
                 problem = getattr(self, "problem", None)
                 judge_type = getattr(problem, "judge_type", 0)
                 if config.rime_kind is None and judge_type != 0:
@@ -384,10 +407,20 @@ def _testset_adapter(base: type[Any]) -> type[Any]:
                     _register_code(self, config, "judge")
                 self.yukicoder_judge_config = config
 
+            def validator(**kwargs: object) -> None:
+                if self.yukicoder_validator_config is not None:
+                    raise RuntimeError("multiple yukicoder_validator() declarations")
+                config = ValidatorConfig(**kwargs)  # type: ignore[arg-type]
+                ensure_distinct("validator", config.src)
+                _register_code(self, config, "validator")
+                self.yukicoder_validator_config = config
+
             self.exports["yukicoder_generator"] = generator
             self.exports["yukicoder_judge"] = judge
+            self.exports["yukicoder_validator"] = validator
             _active["yukicoder_generator"] = generator
             _active["yukicoder_judge"] = judge
+            _active["yukicoder_validator"] = validator
 
         def PostLoad(self, ui: Any) -> None:
             try:
@@ -404,6 +437,7 @@ def _testset_adapter(base: type[Any]) -> type[Any]:
             finally:
                 _active.pop("yukicoder_generator", None)
                 _active.pop("yukicoder_judge", None)
+                _active.pop("yukicoder_validator", None)
 
     Testset.__name__ = "Testset"
     Testset.__qualname__ = "Testset"
@@ -491,4 +525,5 @@ __all__ = [
     "yukicoder_problem",
     "yukicoder_project",
     "yukicoder_solution",
+    "yukicoder_validator",
 ]

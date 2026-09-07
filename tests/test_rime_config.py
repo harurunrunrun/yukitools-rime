@@ -13,6 +13,7 @@ from yukitools_rime.models import (
     ProblemSettings,
     ProjectConfig,
     SolutionConfig,
+    ValidatorConfig,
 )
 from yukitools_rime.rime_config import (
     BEGIN_MARKER,
@@ -46,10 +47,12 @@ def test_all_config_types_round_trip() -> None:
     project = ProjectConfig("https://example.test/api", "build-out")
     assert parse_project_config(render_project_block(project)) == project
     expected_problem = problem()
+    expected_problem.sync = False
     assert parse_problem_config(render_problem_block(expected_problem)) == expected_problem
     testset = rime_config.TestsetConfig(
         GeneratorConfig("cpp20", "generator.cpp", 20, "case", "cxx", {"flags": ["-O2"]}),
         JudgeConfig("cpp20", "judge.cpp", "cxx", {}),
+        ValidatorConfig("cpp20", "validator.cpp", "cxx", {"flags": ["-Wall"]}),
     )
     assert parse_testset_config(render_testset_block(testset)) == testset
     solution = SolutionConfig("cpp20", "main.cpp", "cxx", ["sample01"], {"flags": ["-O2"]})
@@ -96,6 +99,7 @@ def test_upsert_preserves_cr_only_newlines() -> None:
 
 def test_remote_merge_keeps_only_rime_local_fields() -> None:
     local = problem("local")
+    local.sync = False
     remote = ProblemConfig(
         42,
         ProblemSettings("remote", "", 2, 1000, 256, "-", 0, False, False, 0, 0),
@@ -106,6 +110,7 @@ def test_remote_merge_keeps_only_rime_local_fields() -> None:
     assert merged.rime_id == "A"
     assert merged.reference_solution == "correct"
     assert merged.rime_options == {"extra": ["x", 1]}
+    assert merged.sync is False
 
 
 def test_unbalanced_marker_is_rejected() -> None:
@@ -254,6 +259,7 @@ def test_non_python_physical_markers_support_bom_and_replacement() -> None:
         rime_config.TestsetConfig(),
         rime_config.TestsetConfig(generator=GeneratorConfig("cpp", "gen.cpp", 1)),
         rime_config.TestsetConfig(judge=JudgeConfig("cpp", "judge.cpp")),
+        rime_config.TestsetConfig(validator=ValidatorConfig("cpp", "validator.cpp")),
     ],
 )
 def test_testset_rendering_round_trips_each_optional_combination(

@@ -25,6 +25,7 @@ from yukitools_rime.models import (
     ProblemSettings,
     ProjectConfig,
     SolutionConfig,
+    ValidatorConfig,
 )
 
 BEGIN_MARKER = "# BEGIN YUKITOOLS-RIME"
@@ -51,6 +52,7 @@ _PROBLEM_KEYS = (
     "rime_id",
     "reference_solution",
     "rime_options",
+    "sync",
 )
 _GENERATOR_KEYS = (
     "lang_id",
@@ -61,6 +63,7 @@ _GENERATOR_KEYS = (
     "rime_options",
 )
 _JUDGE_KEYS = ("lang_id", "src", "rime_kind", "rime_options")
+_VALIDATOR_KEYS = ("lang_id", "src", "rime_kind", "rime_options")
 _SOLUTION_KEYS = (
     "lang_id",
     "src",
@@ -72,18 +75,26 @@ _SOLUTION_KEYS = (
 
 @dataclass(slots=True)
 class TestsetConfig:
-    """The two optional yukicoder declarations allowed in a TESTSET."""
+    """The optional yukicoder program declarations allowed in a TESTSET."""
 
     generator: GeneratorConfig | None = None
     judge: JudgeConfig | None = None
+    validator: ValidatorConfig | None = None
 
     def __post_init__(self) -> None:
-        if (
-            self.generator is not None
-            and self.judge is not None
-            and self.generator.src.casefold() == self.judge.src.casefold()
-        ):
-            raise ConfigError("generator and judge source files must be distinct")
+        programs = tuple(
+            (name, config.src.casefold())
+            for name, config in (
+                ("generator", self.generator),
+                ("judge", self.judge),
+                ("validator", self.validator),
+            )
+            if config is not None
+        )
+        for index, (left_name, left_src) in enumerate(programs):
+            for right_name, right_src in programs[index + 1 :]:
+                if left_src == right_src:
+                    raise ConfigError(f"{left_name} and {right_name} source files must be distinct")
 
 
 def _syntax_error(exc: SyntaxError) -> ConfigError:
@@ -340,12 +351,27 @@ def parse_judge_config(source: str, *, required: bool = False) -> JudgeConfig | 
     return _construct(JudgeConfig, "yukicoder_judge", values)
 
 
+def parse_validator_config(source: str, *, required: bool = False) -> ValidatorConfig | None:
+    """Parse an optional yukicoder_validator declaration."""
+
+    values = _find_call(
+        source,
+        "yukicoder_validator",
+        _VALIDATOR_KEYS,
+        required=required,
+    )
+    if values is None:
+        return None
+    return _construct(ValidatorConfig, "yukicoder_validator", values)
+
+
 def parse_testset_config(source: str) -> TestsetConfig:
-    """Parse the optional generator and judge declarations in a TESTSET."""
+    """Parse the optional program declarations in a TESTSET."""
 
     return TestsetConfig(
         generator=parse_generator_config(source),
         judge=parse_judge_config(source),
+        validator=parse_validator_config(source),
     )
 
 
@@ -411,12 +437,13 @@ def render_problem_block(config: ProblemConfig) -> str:
         ("rime_id", config.rime_id),
         ("reference_solution", config.reference_solution),
         ("rime_options", config.rime_options),
+        ("sync", config.sync),
     ]
     return _managed(_render_call("yukicoder_problem", pairs))
 
 
 def render_testset_block(config: TestsetConfig) -> str:
-    """Render generator and judge declarations in their stable order."""
+    """Render TESTSET program declarations in their stable order."""
 
     calls: list[str] = []
     if config.generator is not None:
@@ -444,6 +471,19 @@ def render_testset_block(config: TestsetConfig) -> str:
                     ("src", judge.src),
                     ("rime_kind", judge.rime_kind),
                     ("rime_options", judge.rime_options),
+                ],
+            )
+        )
+    if config.validator is not None:
+        validator = config.validator
+        calls.append(
+            _render_call(
+                "yukicoder_validator",
+                [
+                    ("lang_id", validator.lang_id),
+                    ("src", validator.src),
+                    ("rime_kind", validator.rime_kind),
+                    ("rime_options", validator.rime_options),
                 ],
             )
         )
@@ -533,6 +573,7 @@ def merge_remote_problem(local: ProblemConfig, remote: ProblemConfig) -> Problem
         rime_id=local.rime_id,
         reference_solution=local.reference_solution,
         rime_options=dict(local.rime_options),
+        sync=local.sync,
     )
 
 

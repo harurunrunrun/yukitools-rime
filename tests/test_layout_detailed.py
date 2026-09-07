@@ -72,7 +72,7 @@ def create_project(tmp_path: Path, *, problems: int = 1) -> tuple[Path, list[Pat
 @pytest.mark.parametrize(
     ("name", "input_data", "output_data"),
     [
-        ("bad-name", b"in", b"out"),
+        ("bad name", b"in", b"out"),
         ("sample", "in", b"out"),
         ("sample", b"in", "out"),
     ],

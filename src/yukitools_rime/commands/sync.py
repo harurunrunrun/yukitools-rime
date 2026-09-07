@@ -6,7 +6,7 @@ import difflib
 import tempfile
 from collections.abc import Callable
 from contextlib import ExitStack
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Protocol, TypeAlias
 
@@ -15,6 +15,7 @@ from yukitools_rime.api.types import (
     GeneratorContent,
     JudgeCodeContent,
     ProblemEditContent,
+    ValidatorContent,
 )
 from yukitools_rime.errors import ConflictError, FileOperationError, LayoutError, ValidationError
 from yukitools_rime.files import (
@@ -36,6 +37,7 @@ from yukitools_rime.models import (
     JudgeConfig,
     ProblemConfig,
     ProjectConfig,
+    ValidatorConfig,
 )
 from yukitools_rime.rime_config import (
     TestsetConfig,
@@ -55,6 +57,7 @@ from yukitools_rime.testcase_sync import (
     compare_snapshots,
     fetch_remote_snapshot_to,
     replace_local_snapshot,
+    validate_testcase_names_for_server,
 )
 
 
@@ -66,6 +69,8 @@ class SyncClient(TestcaseAPI, Protocol):
     def get_generator(self, problem_id: int) -> GeneratorContent | None: ...
 
     def get_judge_code(self, problem_id: int) -> JudgeCodeContent | None: ...
+
+    def get_validator(self, problem_id: int) -> ValidatorContent: ...
 
     def get_editorial(self, problem_id: int) -> EditorialContent: ...
 
@@ -160,6 +165,7 @@ class _RemoteProblem:
     judge: JudgeCodeContent | None
     editorial: EditorialContent
     testcases: TestcaseSnapshot | None
+    validator: ValidatorContent = field(default_factory=ValidatorContent)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +187,15 @@ class _PullPlan:
 def _selected_problems(target: SyncTarget) -> tuple[ProblemLayout, ...]:
     if isinstance(target, ProblemLayout):
         return (target,)
-    return target.problems
+    if isinstance(target, ProjectLayout):
+        if not target.problems:
+            raise LayoutError("sync target contains no managed problems")
+        return target.sync_problems
+    if target.problems:
+        return target.problems
+    if target.project.problems and target.target == target.project.root:
+        return ()
+    raise LayoutError("sync target contains no managed problems")
 
 
 def _project_config(target: SyncTarget) -> ProjectConfig:
@@ -192,11 +206,24 @@ def _project_config(target: SyncTarget) -> ProjectConfig:
     return discover_project(target.path).config
 
 
+def _get_validator(client: SyncClient, problem_id: int) -> ValidatorContent:
+    """Fetch validator data, tolerating legacy injected clients used by integrations."""
+
+    getter = getattr(client, "get_validator", None)
+    if getter is None:
+        return ValidatorContent()
+    result = getter(problem_id)
+    if not isinstance(result, ValidatorContent):
+        raise ValidationError("validator API returned an unexpected response type")
+    return result
+
+
 def _fetch_remote(
     target: SyncTarget,
     client_factory: ClientFactory,
     *,
     include_testcases: bool,
+    validate_local_testcase_names: bool = False,
     testcase_staging: ExitStack | None = None,
 ) -> tuple[_RemoteProblem, ...]:
     """Fetch every requested resource for every target before local mutation."""
@@ -212,6 +239,7 @@ def _fetch_remote(
             )
         generator = client.get_generator(problem.problem_id)
         judge = client.get_judge_code(problem.problem_id)
+        validator = _get_validator(client, problem.problem_id)
         editorial = client.get_editorial(problem.problem_id)
         if include_testcases:
             if testcase_staging is None:
@@ -221,10 +249,32 @@ def _fetch_remote(
                     tempfile.TemporaryDirectory(prefix=f"yukitools-rime-{problem.problem_id}-")
                 )
             )
-            testcases = fetch_remote_snapshot_to(client, problem.problem_id, staging_directory)
+            testcase_dir = _testcase_directory(problem, _project_config(target))
+            local, missing_outputs, missing_inputs = inspect_testcases(testcase_dir)
+            if validate_local_testcase_names:
+                validate_testcase_names_for_server(
+                    client,
+                    (*local, *missing_outputs, *missing_inputs),
+                )
+            testcases = fetch_remote_snapshot_to(
+                client,
+                problem.problem_id,
+                staging_directory,
+                reuse=local,
+            )
         else:
             testcases = None
-        fetched.append(_RemoteProblem(problem, edit, generator, judge, editorial, testcases))
+        fetched.append(
+            _RemoteProblem(
+                problem,
+                edit,
+                generator,
+                judge,
+                editorial,
+                testcases,
+                validator,
+            )
+        )
     return tuple(fetched)
 
 
@@ -367,7 +417,7 @@ def _build_pull_plan(
         warnings.append(f"problem {problem.problem_id} is not public")
 
     testset_path, testset_source, testset = _testset_state(problem)
-    original_testset = TestsetConfig(testset.generator, testset.judge)
+    original_testset = TestsetConfig(testset.generator, testset.judge, testset.validator)
     generator = remote.generator
     if generator is None or not generator.source.strip():
         warnings.append(f"problem {problem.problem_id}: remote generator is unavailable or empty")
@@ -420,7 +470,43 @@ def _build_pull_plan(
             normalize_text(judge.source).encode("utf-8"),
         )
 
-    testset = TestsetConfig(testset.generator, testset.judge)
+    validator = remote.validator
+    if not validator.source.strip():
+        if testset.validator is not None:
+            warnings.append(
+                f"problem {problem.problem_id}: remote validator is unavailable or empty"
+            )
+    else:
+        existing_validator = testset.validator
+        validator_config = ValidatorConfig(
+            lang_id=validator.lang_id,
+            src=(
+                existing_validator.src
+                if existing_validator
+                else default_source_name("validator", validator.lang_id)
+            ),
+            rime_kind=(
+                existing_validator.rime_kind
+                if existing_validator
+                else infer_rime_kind(validator.lang_id)
+            ),
+            rime_options=(dict(existing_validator.rime_options) if existing_validator else {}),
+        )
+        testset.validator = validator_config
+        validator_source_path = testset_path / validator_config.src
+        if existing_validator is None and (
+            validator_source_path.exists() or validator_source_path.is_symlink()
+        ):
+            raise ConflictError(
+                f"refusing to overwrite existing validator source: {validator_source_path}"
+            )
+        _append_mutation(
+            mutations,
+            validator_source_path,
+            normalize_text(validator.source).encode("utf-8"),
+        )
+
+    testset = TestsetConfig(testset.generator, testset.judge, testset.validator)
     needs_testset_for_cases = problem.testset is None and remote.testcases is not None
 
     if testset != original_testset or needs_testset_for_cases:
@@ -622,8 +708,8 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
     entries: list[DiffEntry] = []
     warnings: list[str] = []
     local_problem = parse_problem_config(read_config_source(problem.config_path))
-    for field in fields(remote.edit.settings):
-        name = field.name
+    for model_field in fields(remote.edit.settings):
+        name = model_field.name
         remote_value = getattr(remote.edit.settings, name)
         local_value = getattr(local_problem.settings, name)
         if remote_value != local_value:
@@ -715,6 +801,34 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
         if unified:
             entries.append(DiffEntry("judge", "source differs", unified))
 
+    validator = remote.validator
+    if not validator.source.strip():
+        if testset.validator is not None:
+            local_source = _source_text(testset_path / testset.validator.src)
+            if local_source.strip():
+                entries.append(DiffEntry("validator", "registered locally but empty remotely"))
+            warnings.append(
+                f"problem {problem.problem_id}: remote validator is unavailable or empty"
+            )
+    elif testset.validator is None:
+        entries.append(DiffEntry("validator", "present remotely but missing locally"))
+    else:
+        local_validator = testset.validator
+        if validator.lang_id != local_validator.lang_id:
+            entries.append(
+                DiffEntry(
+                    "validator.lang_id",
+                    f"remote={validator.lang_id!r} local={local_validator.lang_id!r}",
+                )
+            )
+        unified = _unified(
+            local_validator.src,
+            validator.source,
+            _source_text(testset_path / local_validator.src),
+        )
+        if unified:
+            entries.append(DiffEntry("validator", "source differs", unified))
+
     if remote.testcases is not None:
         directory = _testcase_directory(problem, project_config)
         local_cases, missing_outputs, missing_inputs = inspect_testcases(directory)
@@ -749,6 +863,7 @@ def diff_remote(
             target,
             client_factory,
             include_testcases=include_testcases,
+            validate_local_testcase_names=include_testcases,
             testcase_staging=testcase_staging,
         )
         project_config = _project_config(target)

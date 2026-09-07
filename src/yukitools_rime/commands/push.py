@@ -20,7 +20,11 @@ from yukitools_rime.api.types import (
     JudgeCodeSaveResponse,
     ProblemEditContent,
     ProblemEditRequest,
+    StatusInfo,
     UploadResponse,
+    ValidatorContent,
+    ValidatorRequest,
+    judging_ids,
 )
 from yukitools_rime.errors import APIError, AppError, LayoutError, UsageError, ValidationError
 from yukitools_rime.files import normalize_text, read_text, require_regular_file
@@ -39,15 +43,19 @@ from yukitools_rime.models import (
     ProblemConfig,
     ProjectConfig,
     Statement,
+    ValidatorConfig,
     Which,
 )
 from yukitools_rime.rime_config import parse_problem_config, parse_testset_config
 from yukitools_rime.testcase_sync import (
+    RemoteTestcaseHashes,
     RemoteTestcaseSides,
     TestcaseAPI,
     batch_upload_files,
+    fetch_remote_hashes,
     fetch_remote_sides,
     replace_local_snapshot,
+    validate_snapshot_names_for_server,
 )
 
 
@@ -72,6 +80,14 @@ class PushClient(TestcaseAPI, Protocol):
 
     def save_editorial(self, problem_id: int, request: EditorialRequest) -> object: ...
 
+    def get_validator(self, problem_id: int) -> ValidatorContent: ...
+
+    def save_validator(
+        self, problem_id: int, request: ValidatorRequest
+    ) -> JudgeCodeSaveResponse: ...
+
+    def statuses(self) -> list[StatusInfo]: ...
+
 
 ClientFactory: TypeAlias = Callable[[ProblemLayout], PushClient]
 PushTarget: TypeAlias = ProjectLayout | TargetSelection | ProblemLayout
@@ -81,6 +97,10 @@ Clock: TypeAlias = Callable[[], float]
 
 class JudgeCompileError(APIError):
     """A newly saved custom judge reached CE."""
+
+
+class ValidatorValidationError(APIError):
+    """A validator reached a non-AC terminal result."""
 
 
 class PushExecutionError(APIError):
@@ -154,7 +174,7 @@ class PushResult:
 
 @dataclass(frozen=True, slots=True)
 class _LocalProgram:
-    config: GeneratorConfig | JudgeConfig
+    config: GeneratorConfig | JudgeConfig | ValidatorConfig
     source: str
 
     @property
@@ -172,6 +192,7 @@ class _LocalProblem:
     editorial: Statement | None
     testcase_dir: Path | None
     testcases: Mapping[str, TestCaseData] | None
+    validator: _LocalProgram | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,10 +205,20 @@ class _TestcasePlan:
     directory: Path
 
     @property
+    def has_uploads(self) -> bool:
+        return bool(self.input_batches or self.output_batches)
+
+    @property
     def has_writes(self) -> bool:
-        return bool(
-            self.input_batches or self.output_batches or self.stale_inputs or self.stale_outputs
-        )
+        return bool(self.has_uploads or self.stale_inputs or self.stale_outputs)
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidatorPlan:
+    local: _LocalProgram
+    remote: ValidatorContent
+    request: ValidatorRequest | None
+    judging: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +230,8 @@ class _ProblemPlan:
     judge_request: JudgeCodeRequest | None
     editorial_request: EditorialRequest | None
     testcases: _TestcasePlan | None
+    validator: _ValidatorPlan | None = None
+    judge_judging: frozenset[str] = frozenset()
 
     @property
     def planned_items(self) -> tuple[str, ...]:
@@ -224,22 +257,31 @@ class _ProblemPlan:
                     items.append(f"{prefix} delete testcase input {name}")
                 if name in testcases.stale_outputs:
                     items.append(f"{prefix} delete testcase output {name}")
-            if testcases.has_writes:
+            if testcases.has_uploads:
                 items.append(f"{prefix} testcase normalization refresh")
+        if self.validator is not None and self.validator.request is not None:
+            items.append(f"{prefix} validator")
         return tuple(items)
 
 
 def _selected_problems(target: PushTarget) -> tuple[ProblemLayout, ...]:
-    problems: tuple[ProblemLayout, ...]
     if isinstance(target, ProblemLayout):
-        problems = (target,)
-    elif isinstance(target, (ProjectLayout, TargetSelection)):
+        return (target,)
+    if isinstance(target, ProjectLayout):
+        project = target
+        problems = target.sync_problems
+        project_wide = True
+    elif isinstance(target, TargetSelection):
+        project = target.project
         problems = target.problems
+        project_wide = target.target == project.root
     else:
         raise TypeError("target must be a ProjectLayout, TargetSelection, or ProblemLayout")
-    if not problems:
-        raise LayoutError("push target contains no managed problems")
-    return problems
+    if problems:
+        return problems
+    if project.problems and project_wide:
+        return ()
+    raise LayoutError("push target contains no managed problems")
 
 
 def _project_config(target: PushTarget) -> ProjectConfig:
@@ -268,7 +310,7 @@ def _document(problem: ProblemLayout, stem: str, *, required: bool) -> Statement
 
 def _local_program(
     testset_path: Path,
-    config: GeneratorConfig | JudgeConfig | None,
+    config: GeneratorConfig | JudgeConfig | ValidatorConfig | None,
 ) -> _LocalProgram | None:
     if config is None:
         return None
@@ -289,10 +331,12 @@ def _preflight_local(
     assert statement is not None
     generator: _LocalProgram | None = None
     judge: _LocalProgram | None = None
+    validator: _LocalProgram | None = None
     if current.testset is not None:
         testset = parse_testset_config(read_text(current.testset.config_path))
         generator = _local_program(current.testset.path, testset.generator)
         judge = _local_program(current.testset.path, testset.judge)
+        validator = _local_program(current.testset.path, testset.validator)
     if generate and generator is None:
         raise ValidationError(
             f"{current.path}: --generate requires a local yukicoder_generator declaration"
@@ -323,6 +367,7 @@ def _preflight_local(
         editorial,
         testcase_dir,
         testcases,
+        validator,
     )
 
 
@@ -332,22 +377,34 @@ def _same_document(remote_text: str, remote_markdown: bool, local: Statement) ->
 
 def _testcase_plan(
     local: _LocalProblem,
-    remote: RemoteTestcaseSides,
+    remote: RemoteTestcaseHashes | RemoteTestcaseSides,
     *,
     prune: bool,
 ) -> _TestcasePlan:
     assert local.testcase_dir is not None
     assert local.testcases is not None
-    inputs = {
-        name: case.input
-        for name, case in local.testcases.items()
-        if name not in remote.inputs or remote.inputs[name] != case.input
-    }
-    outputs = {
-        name: case.output
-        for name, case in local.testcases.items()
-        if name not in remote.outputs or remote.outputs[name] != case.output
-    }
+    if isinstance(remote, RemoteTestcaseHashes):
+        inputs = {
+            name: case.input
+            for name, case in local.testcases.items()
+            if not remote.matches(Which.IN, name, case.input)
+        }
+        outputs = {
+            name: case.output
+            for name, case in local.testcases.items()
+            if not remote.matches(Which.OUT, name, case.output)
+        }
+    else:
+        inputs = {
+            name: case.input
+            for name, case in local.testcases.items()
+            if name not in remote.inputs or remote.inputs[name] != case.input
+        }
+        outputs = {
+            name: case.output
+            for name, case in local.testcases.items()
+            if name not in remote.outputs or remote.outputs[name] != case.output
+        }
     stale_inputs = tuple(sorted(set(remote.inputs) - set(local.testcases))) if prune else ()
     stale_outputs = tuple(sorted(set(remote.outputs) - set(local.testcases))) if prune else ()
     return _TestcasePlan(
@@ -358,6 +415,26 @@ def _testcase_plan(
         stale_outputs,
         local.testcase_dir,
     )
+
+
+_VALIDATOR_TIMEOUT = 600.0
+_VALIDATOR_POLL_INTERVAL = 5.0
+
+
+def _validator_content(client: PushClient, problem_id: int) -> ValidatorContent:
+    result = client.get_validator(problem_id)
+    if not isinstance(result, ValidatorContent):
+        raise ValidationError("validator API returned an unexpected response type")
+    return result
+
+
+def _client_judging_statuses(client: PushClient) -> frozenset[str]:
+    statuses = client.statuses()
+    if not isinstance(statuses, (list, tuple)) or any(
+        not isinstance(status, StatusInfo) for status in statuses
+    ):
+        raise ValidationError("statuses API returned an unexpected response type")
+    return judging_ids(statuses)
 
 
 def _build_remote_plan(
@@ -409,6 +486,7 @@ def _build_remote_plan(
             )
 
     judge_request: JudgeCodeRequest | None = None
+    server_judging: frozenset[str] | None = None
     if local.judge is not None:
         judge_config = local.judge.config
         assert isinstance(judge_config, JudgeConfig)
@@ -429,6 +507,8 @@ def _build_remote_plan(
                 judge_config.lang_id,
                 "" if deleting else local.judge.source,
             )
+            if not deleting:
+                server_judging = _client_judging_statuses(client)
 
     editorial_request: EditorialRequest | None = None
     if local.editorial is not None:
@@ -444,8 +524,44 @@ def _build_remote_plan(
 
     testcase_plan = None
     if include_testcases:
-        remote_cases = fetch_remote_sides(client, problem_id)
+        assert local.testcases is not None
+        validate_snapshot_names_for_server(client, local.testcases)
+        remote_hashes = fetch_remote_hashes(client, problem_id)
+        remote_cases = (
+            fetch_remote_sides(client, problem_id) if remote_hashes is None else remote_hashes
+        )
         testcase_plan = _testcase_plan(local, remote_cases, prune=prune)
+
+    validator_plan: _ValidatorPlan | None = None
+    if local.validator is not None:
+        validator_config = local.validator.config
+        assert isinstance(validator_config, ValidatorConfig)
+        remote_validator = _validator_content(client, problem_id)
+        deleting = local.validator.deleting
+        remote_has_source = bool(remote_validator.source.strip())
+        changed = (
+            remote_has_source
+            if deleting
+            else not remote_has_source
+            or remote_validator.lang_id != validator_config.lang_id
+            or normalize_text(remote_validator.source) != local.validator.source
+        )
+        validator_request = (
+            ValidatorRequest(
+                validator_config.lang_id,
+                "" if deleting else local.validator.source,
+            )
+            if changed
+            else None
+        )
+        validator_plan = _ValidatorPlan(
+            local.validator,
+            remote_validator,
+            validator_request,
+            (server_judging if server_judging is not None else _client_judging_statuses(client))
+            if not deleting
+            else frozenset(),
+        )
     return _ProblemPlan(
         local,
         client,
@@ -454,6 +570,8 @@ def _build_remote_plan(
         judge_request,
         editorial_request,
         testcase_plan,
+        validator_plan,
+        judge_judging=server_judging if server_judging is not None else frozenset(),
     )
 
 
@@ -525,15 +643,24 @@ def _wait_for_judge(
 ) -> str | None:
     problem_id = plan.local.problem.problem_id
 
-    def outcome(status: str) -> str | None:
+    def completed(code: JudgeCodeContent) -> bool:
+        status = code.status
+        if not status or status in plan.judge_judging:
+            return False
         if status == "AC":
-            return None
-        if status == "CE":
-            raise JudgeCompileError(f"problem {problem_id} judge compilation failed with CE")
-        return status
+            return True
+        message = code.compile_message.strip()
+        details = f"\ncompile message:\n{message}" if message else ""
+        raise JudgeCompileError(
+            f"problem {problem_id} judge compilation failed with {status}{details}"
+        )
 
-    pending = outcome(initial_status)
-    if pending is None:
+    initial = JudgeCodeContent(status=initial_status)
+    if initial_status and initial_status != "AC" and initial_status not in plan.judge_judging:
+        current = plan.client.get_judge_code(problem_id)
+        if current is not None:
+            completed(current)
+    if completed(initial):
         return None
     if no_wait_compile:
         return (
@@ -541,21 +668,66 @@ def _wait_for_judge(
             f"(status={initial_status or 'unknown'})"
         )
     deadline = monotonic() + timeout
-    status = initial_status
+    current = initial
     while True:
         remaining = deadline - monotonic()
         if remaining <= 0:
             return (
                 f"problem {problem_id}: judge compilation timed out "
-                f"(last status={status or 'unknown'})"
+                f"(last status={current.status or 'unknown'})"
             )
         sleep(min(interval, remaining))
         code = plan.client.get_judge_code(problem_id)
         if code is None:
             continue
-        status = code.status
-        pending = outcome(status)
-        if pending is None:
+        current = code
+        if completed(current):
+            return None
+
+
+def _wait_for_validator(
+    plan: _ProblemPlan,
+    validator: _ValidatorPlan,
+    *,
+    force_refresh: bool,
+    no_wait_compile: bool,
+    timeout: float,
+    interval: float,
+    sleep: Sleep,
+    monotonic: Clock,
+) -> str | None:
+    problem_id = plan.local.problem.problem_id
+
+    def completed(content: ValidatorContent) -> bool:
+        if not content.is_up_to_date(validator.judging):
+            return False
+        if content.status == "AC":
+            return True
+        details = content.failure_details()
+        raise ValidatorValidationError(
+            f"problem {problem_id} validator validation failed "
+            f"with {content.status or 'unknown'}{details}"
+        )
+
+    current = validator.remote
+    if not force_refresh and completed(current):
+        return None
+    if no_wait_compile:
+        return (
+            f"problem {problem_id}: validator validation was not awaited "
+            f"(status={current.status or 'unknown'})"
+        )
+    deadline = monotonic() + timeout
+    while True:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return (
+                f"problem {problem_id}: validator validation timed out "
+                f"(last status={current.status or 'unknown'})"
+            )
+        sleep(min(interval, remaining))
+        current = _validator_content(plan.client, problem_id)
+        if completed(current):
             return None
 
 
@@ -677,13 +849,19 @@ def _execute_plan(
                     partial(plan.client.delete_testcase, problem_id, Which.OUT, name),
                 )
 
+        uploaded_input_names = {name for batch in testcases.input_batches for name in batch}
+        uploaded_output_names = {name for batch in testcases.output_batches for name in batch}
+        uploaded_names = uploaded_input_names | uploaded_output_names
+
         def refresh() -> None:
             if testcase_refresh_delay:
                 sleep(testcase_refresh_delay)
-            uploaded_input_names = {name for batch in testcases.input_batches for name in batch}
-            uploaded_output_names = {name for batch in testcases.output_batches for name in batch}
-            uploaded_names = uploaded_input_names | uploaded_output_names
-            normalized = fetch_remote_sides(plan.client, problem_id)
+            normalized = fetch_remote_sides(
+                plan.client,
+                problem_id,
+                reuse=testcases.local,
+                names=uploaded_names,
+            )
             normalized_uploaded = normalized.require_complete(uploaded_names)
             refreshed = dict(testcases.local)
             for name in uploaded_names:
@@ -696,11 +874,48 @@ def _execute_plan(
                 )
             replace_local_snapshot(testcases.directory, refreshed)
 
-        _perform(
-            f"{prefix} testcase normalization refresh",
-            completed,
-            refresh,
-        )
+        if uploaded_names:
+            _perform(
+                f"{prefix} testcase normalization refresh",
+                completed,
+                refresh,
+            )
+
+    validator = plan.validator
+    if validator is not None:
+        validator_request = validator.request
+        if validator_request is not None:
+            _perform(
+                f"{prefix} validator",
+                completed,
+                partial(plan.client.save_validator, problem_id, validator_request),
+            )
+        if not validator.local.deleting:
+            testcases_changed = testcases is not None and testcases.has_writes
+            try:
+                warning = _wait_for_validator(
+                    plan,
+                    validator,
+                    force_refresh=validator_request is not None or testcases_changed,
+                    no_wait_compile=no_wait_compile,
+                    timeout=_VALIDATOR_TIMEOUT,
+                    interval=_VALIDATOR_POLL_INTERVAL,
+                    sleep=sleep,
+                    monotonic=monotonic,
+                )
+            except KeyboardInterrupt as exc:
+                raise PushInterrupted(
+                    f"{prefix} validator validation",
+                    tuple(completed),
+                ) from exc
+            except Exception as exc:
+                raise PushExecutionError(
+                    f"{prefix} validator validation",
+                    tuple(completed),
+                    exc,
+                ) from exc
+            if warning is not None:
+                warnings.append(warning)
     return tuple(completed[before:]), tuple(warnings)
 
 
@@ -804,6 +1019,7 @@ __all__ = [
     "PushProblemResult",
     "PushResult",
     "PushTarget",
+    "ValidatorValidationError",
     "push",
     "push_selection",
 ]
