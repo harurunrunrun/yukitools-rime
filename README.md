@@ -13,11 +13,6 @@ PROJECT を実行するときだけ遅延 import します。
 
 ### GitHub Release からインストールする (推奨)
 
-> **注意:** 現在公開済みの `v0.1.1` Release は、上流
-> `yukicoder_tools` `128249f` に対応する今回の変更をまだ含みません。validator、
-> 動的status、testcase hash/name rule、`sync=False` を利用する場合は、次節の
-> `git clone` 手順で `main` をビルドしてください。
-
 [Releases](https://github.com/harurunrunrun/yukitools-rime/releases) では、OS に依存しない
 Python wheel とソースアーカイブを公開します。Linux / WSL では次の手順で専用の
 virtual environment に wheel を直接インストールできます。
@@ -27,7 +22,7 @@ python3 --version  # 3.11 以上であることを確認
 python3 -m venv ~/.venvs/yukitools-rime
 . ~/.venvs/yukitools-rime/bin/activate
 python -m pip install --upgrade pip
-VERSION=0.1.1
+VERSION=0.1.2
 python -m pip install "https://github.com/harurunrunrun/yukitools-rime/releases/download/v${VERSION}/yukitools_rime-${VERSION}-py3-none-any.whl"
 yukitools-rime --version
 yukitools-rime --help
@@ -50,7 +45,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip build
 python -m build
-python -m pip install --force-reinstall dist/yukitools_rime-0.1.1-py3-none-any.whl
+python -m pip install --force-reinstall dist/yukitools_rime-0.1.2-py3-none-any.whl
 yukitools-rime --version
 yukitools-rime --help
 ~~~
@@ -78,7 +73,7 @@ Release版は新しいRelease番号を `VERSION` へ指定して更新します�
 
 ~~~console
 . ~/.venvs/yukitools-rime/bin/activate
-VERSION=0.1.1
+VERSION=0.1.2
 python -m pip install --upgrade "https://github.com/harurunrunrun/yukitools-rime/releases/download/v${VERSION}/yukitools_rime-${VERSION}-py3-none-any.whl"
 yukitools-rime --version
 ~~~
@@ -91,7 +86,7 @@ clone版はcloneしたディレクトリへ移動し、次のように更新し�
 . .venv/bin/activate
 git pull --ff-only
 python -m build
-python -m pip install --upgrade --force-reinstall dist/yukitools_rime-0.1.1-py3-none-any.whl
+python -m pip install --upgrade --force-reinstall dist/yukitools_rime-0.1.2-py3-none-any.whl
 yukitools-rime --version
 ~~~
 
