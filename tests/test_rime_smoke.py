@@ -14,6 +14,7 @@ from yukitools_rime.models import (
     ProblemSettings,
     ProjectConfig,
     SolutionConfig,
+    ValidatorConfig,
 )
 from yukitools_rime.rime_config import (
     TestsetConfig as RimeTestsetConfig,
@@ -94,6 +95,11 @@ def test_reference_rime_loads_all_managed_configurations(tmp_path: Path) -> None
                     src="judge.py",
                     rime_kind="script",
                 ),
+                validator=ValidatorConfig(
+                    lang_id="python3",
+                    src="validator.py",
+                    rime_kind="script",
+                ),
             )
         ),
         encoding="utf-8",
@@ -125,6 +131,7 @@ def test_reference_rime_loads_all_managed_configurations(tmp_path: Path) -> None
     for path in (
         testset / "generator.py",
         testset / "judge.py",
+        testset / "validator.py",
         solution / "main.py",
         unknown_solution / "main.txt",
     ):

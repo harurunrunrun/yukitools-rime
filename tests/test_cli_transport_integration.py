@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
 import json
 from dataclasses import dataclass, field
@@ -20,6 +21,7 @@ from yukitools_rime.models import (
     ProblemSettings,
     ProjectConfig,
     SolutionConfig,
+    ValidatorConfig,
 )
 from yukitools_rime.rime_config import TestsetConfig as RimeTestsetConfig
 from yukitools_rime.rime_config import (
@@ -30,6 +32,7 @@ from yukitools_rime.rime_config import (
     render_solution_block,
     render_testset_block,
 )
+from yukitools_rime.testcase_sync import DEFAULT_SERVER_CASE_CHARS
 
 BASE_URL = "https://mock.example/api"
 TOKEN = "integration-token"
@@ -90,6 +93,8 @@ class RemoteState:
     requests: list[httpx.Request] = field(default_factory=list)
     solution_requests: list[dict[str, object]] = field(default_factory=list)
     submitted_bodies: list[bytes] = field(default_factory=list)
+    validator_source: str = ""
+    validator_requests: list[dict[str, object]] = field(default_factory=list)
 
     def problem_payload(self) -> dict[str, object]:
         return {
@@ -132,6 +137,24 @@ class RemoteState:
             return httpx.Response(200, json={})
         if request.method == "GET" and path == "/api/v1/problems/42/code":
             return httpx.Response(404, text="not configured")
+        if request.method == "PUT" and path == "/api/v1/problems/42/validator":
+            payload = decode_json(request)
+            self.validator_requests.append(payload)
+            self.validator_source = str(payload["source"])
+            return httpx.Response(200, json={"status": "WJ"})
+        if request.method == "GET" and path == "/api/v1/problems/42/validator":
+            if not self.validator_source:
+                return httpx.Response(200, json={})
+            return httpx.Response(
+                200,
+                json={
+                    "langId": "py",
+                    "source": self.validator_source,
+                    "status": "AC",
+                    "compileMessage": "",
+                    "cases": [],
+                },
+            )
         if request.method == "GET" and path == "/api/v1/problems/42/editorial":
             return httpx.Response(200, json={})
         if request.method == "GET" and path == "/api/v1/problems/42/file/in":
@@ -144,6 +167,12 @@ class RemoteState:
         if request.method == "PUT" and path == "/api/v1/submissions/321/solution":
             self.solution_requests.append(decode_json(request))
             return httpx.Response(200, json={"Message": "saved"})
+        if request.method == "GET" and path == "/api/v1/testcase_name_rule":
+            return httpx.Response(200, json={"allowedChars": DEFAULT_SERVER_CASE_CHARS})
+        if request.method == "GET" and path == "/api/v1/statuses":
+            return httpx.Response(200, json=[{"id": "WJ", "category": "judging"}])
+        if request.method == "GET" and path == "/api/v1/submissions/321":
+            return httpx.Response(200, json={"status": "AC", "runTimeMs": 7})
         if request.method == "GET" and path == "/api/v1/languages":
             return httpx.Response(
                 200,
@@ -167,6 +196,15 @@ def test_stateful_transport_round_trip_across_cli_api_and_filesystem(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, solution = make_project(tmp_path / "project")
+    testset = project / "tests"
+    testset.mkdir()
+    (testset / "TESTSET").write_text(
+        render_testset_block(
+            RimeTestsetConfig(validator=ValidatorConfig("py", "validator.py", "script"))
+        ),
+        encoding="utf-8",
+    )
+    (testset / "validator.py").write_text("print('validate')\n", encoding="utf-8")
     outside = tmp_path / "outside"
     outside.mkdir()
     monkeypatch.chdir(outside)
@@ -208,6 +246,9 @@ def test_stateful_transport_round_trip_across_cli_api_and_filesystem(
     assert "完了: problem 42 settings/statement" in stdout
     assert stderr == ""
     assert remote.statement == "pushed statement\n"
+    assert "完了: problem 42 validator" in stdout
+    assert remote.validator_source == "print('validate')\n"
+    assert remote.validator_requests == [{"langId": "py", "source": "print('validate')\n"}]
 
     code, stdout, stderr = invoke(["testcases", str(project), "--which", "in"])
     assert code == 0
@@ -218,6 +259,7 @@ def test_stateful_transport_round_trip_across_cli_api_and_filesystem(
     code, stdout, stderr = invoke(["submit", str(solution)])
     assert code == 0
     assert "提出ID 321" in stdout
+    assert "結果: AC (7 ms)" in stdout
     assert stderr == ""
     assert any(b'print("hello")\n' in body for body in remote.submitted_bodies)
 
@@ -241,7 +283,10 @@ def test_stateful_transport_round_trip_across_cli_api_and_filesystem(
     assert "remote judge API is unavailable" in stderr
 
     authenticated_requests = [
-        request for request in remote.requests if request.url.path != "/api/v1/languages"
+        request
+        for request in remote.requests
+        if request.url.path
+        not in {"/api/v1/languages", "/api/v1/statuses", "/api/v1/testcase_name_rule"}
     ]
     assert authenticated_requests
     assert all(
@@ -253,6 +298,11 @@ def test_stateful_transport_round_trip_across_cli_api_and_filesystem(
     ]
     assert len(language_requests) == 1
     assert language_requests[0].headers.get("authorization") is None
+    status_requests = [
+        request for request in remote.requests if request.url.path == "/api/v1/statuses"
+    ]
+    assert len(status_requests) == 2
+    assert status_requests[0].headers.get("authorization") is None
     assert all(client._http.is_closed for client in authenticated_clients)
     assert all(client._http.is_closed for client in anonymous_clients)
 
@@ -375,6 +425,17 @@ class NewProblemRemote:
                     "status": "AC",
                 },
             )
+        if request.method == "GET" and path == "/api/v1/problems/77/validator":
+            return httpx.Response(
+                200,
+                json={
+                    "langId": "python3",
+                    "source": "print('validate')\r\n",
+                    "status": "AC",
+                    "compileMessage": "",
+                    "cases": [],
+                },
+            )
         raise AssertionError(f"unexpected request: {request.method} {path}")
 
 
@@ -424,12 +485,18 @@ def test_cli_init_then_new_crosses_real_client_serialization_and_filesystem(
     assert testset.judge.lang_id == "cpp20"
     assert testset.judge.src == "judge.cpp"
     assert testset.judge.rime_kind == "cxx"
+    assert testset.validator is not None
+    assert testset.validator.lang_id == "python3"
+    assert testset.validator.src == "validator.py"
+    assert testset.validator.rime_kind == "script"
     assert (problem / "tests" / "generator.py").read_bytes() == b"print('generate')\n"
     assert (problem / "tests" / "judge.cpp").read_bytes() == b"int main() {}\n"
+    assert (problem / "tests" / "validator.py").read_bytes() == b"print('validate')\n"
     assert [(request.method, request.url.path) for request in remote.requests] == [
         ("GET", "/api/v1/problems/77/edit"),
         ("GET", "/api/v1/problems/77/generator"),
         ("GET", "/api/v1/problems/77/code"),
+        ("GET", "/api/v1/problems/77/validator"),
     ]
     assert all(
         request.headers.get("authorization") == f"Bearer {TOKEN}" for request in remote.requests
@@ -456,6 +523,14 @@ class _TestcaseRemote(RemoteState):
         assert side in {"in", "out"}
         if request.method == "GET" and len(parts) == 1:
             names = sorted(name for candidate_side, name in self.cases if candidate_side == side)
+            if request.url.params.get("detail") == "1":
+                return httpx.Response(
+                    200,
+                    json=[
+                        {"name": name, "sha256": hashlib.sha256(self.cases[side, name]).hexdigest()}
+                        for name in names
+                    ],
+                )
             return httpx.Response(200, json=names)
         if request.method == "GET" and len(parts) == 2:
             content = self.cases.get((side, parts[1]))
@@ -536,6 +611,21 @@ def test_cli_push_repairs_only_output_after_partial_http_upload(
     }
     assert (cases / "sample.in").read_bytes() == b"input"
     assert (cases / "sample.diff").read_bytes() == b"output"
+    rule_requests = [
+        request for request in remote.requests if request.url.path == "/api/v1/testcase_name_rule"
+    ]
+    detail_requests = [
+        request
+        for request in remote.requests
+        if request.url.path in {"/api/v1/problems/42/file/in", "/api/v1/problems/42/file/out"}
+        and request.url.params.get("detail") == "1"
+    ]
+    body_downloads = [
+        request for request in remote.requests if request.url.path.endswith("/sample")
+    ]
+    assert len(rule_requests) == 2
+    assert len(detail_requests) >= 4
+    assert body_downloads == []
     assert len(clients) == 2
     assert all(client._http.is_closed for client in clients)
 

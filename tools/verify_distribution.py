@@ -784,6 +784,7 @@ from yukitools_rime.models import (
     ProblemSettings,
     ProjectConfig,
     SolutionConfig,
+    ValidatorConfig,
 )
 from yukitools_rime.rime_config import (
     TestsetConfig,
@@ -846,6 +847,11 @@ unknown.mkdir()
                 src="judge.py",
                 rime_kind="script",
             ),
+            validator=ValidatorConfig(
+                lang_id="python3",
+                src="validator.py",
+                rime_kind="script",
+            ),
         )
     ),
     encoding="utf-8",
@@ -866,6 +872,7 @@ unknown.mkdir()
 for path in (
     testset / "generator.py",
     testset / "judge.py",
+    testset / "validator.py",
     solution / "main.py",
     unknown / "main.txt",
 ):
@@ -1055,10 +1062,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sdist,
                     launcher=args.python,
                     spec=spec,
-                    rime_dir=None,
+                    rime_dir=rime_dir,
                     windows_path_smoke=False,
                 )
-                print("verified fresh sdist install")
+                if rime_dir is None:
+                    print("verified fresh sdist install")
+                else:
+                    print("verified fresh sdist install and Rime init/load/build")
     except (OSError, VerificationError) as exc:
         print(f"distribution verification failed: {exc}", file=sys.stderr)
         return 1

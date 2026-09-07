@@ -148,6 +148,36 @@ def test_parser_accepts_wheel_only_install_mode() -> None:
     assert parsed.skip_sdist_install is True
 
 
+def test_distribution_rime_project_smoke_declares_validator(tmp_path: Path) -> None:
+    from yukitools_rime.rime_config import parse_testset_config
+
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    project = tmp_path / "installed artifact project"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            cast(str, _VERIFIER._RIME_PROJECT_SMOKE),
+            str(project),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    config = parse_testset_config((project / "a" / "tests" / "TESTSET").read_text())
+    assert config.validator is not None
+    assert config.validator.src == "validator.py"
+    assert config.validator.rime_kind == "script"
+    assert (project / "a" / "tests" / "validator.py").is_file()
+
+
 def test_support_sources_are_exactly_expected_in_sdist_not_wheel() -> None:
     root = Path(__file__).resolve().parents[1]
     spec = _VERIFIER._load_project(root)
