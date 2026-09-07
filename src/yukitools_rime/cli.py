@@ -114,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     command = commands.add_parser("submit", help="RimeのSOLUTIONを提出する")
     command.add_argument("solution", nargs="?", default=".", metavar="SOLUTION")
+    command.add_argument("--no-wait", action="store_true", help="ジャッジ結果を待たない")
 
     command = commands.add_parser("solution", help="提出を想定解として登録または解除する")
     command.add_argument("submission_id", type=_positive_int, metavar="提出ID")
@@ -334,19 +335,47 @@ def _dispatch(
             return 0
 
         if args.command == "submit":
+            submission_reported = False
+
+            def report_submitted(problem_id: int, submission_id: int) -> None:
+                nonlocal submission_reported
+                _line(
+                    stdout,
+                    f"提出しました: 問題 {problem_id}, 提出ID {submission_id}",
+                )
+                _line(stdout, f"https://yukicoder.me/submissions/{submission_id}")
+                if not args.no_wait:
+                    _line(stdout, "ジャッジを待っています...")
+                submission_reported = True
+
             submit_result = submit_solution(
                 resolve_target(args.solution),
                 cast(SubmissionClientFactory, problem_factory),
+                wait=not args.no_wait,
+                on_submitted=report_submitted,
             )
             if submit_result.submission_id is None:
                 _line(stdout, f"提出しました: 問題 {submit_result.problem_id}")
                 _line(stderr, "警告: 提出IDをサーバー応答から判別できませんでした。")
             else:
-                _line(
-                    stdout,
-                    f"提出しました: 問題 {submit_result.problem_id}, "
-                    f"提出ID {submit_result.submission_id}",
-                )
+                if not submission_reported:
+                    _line(
+                        stdout,
+                        f"提出しました: 問題 {submit_result.problem_id}, "
+                        f"提出ID {submit_result.submission_id}",
+                    )
+                judge_status = getattr(submit_result, "judge_status", None)
+                if judge_status is not None:
+                    _line(
+                        stdout,
+                        f"結果: {judge_status} ({submit_result.run_time_ms} ms)",
+                    )
+                elif getattr(submit_result, "wait_timed_out", False):
+                    _line(
+                        stderr,
+                        "警告: 10分待ってもジャッジが終わりませんでした。"
+                        "提出ページで結果を確認してください。",
+                    )
             return 0
 
         if args.command == "solution":

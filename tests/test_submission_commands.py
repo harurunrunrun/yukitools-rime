@@ -4,12 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from yukitools_rime.api.types import SolutionRequest
+from yukitools_rime.api.types import SolutionRequest, StatusInfo, SubmissionInfo
 from yukitools_rime.commands.submission import (
     SubmissionResponseError,
     manage_expected_solution,
     parse_submission_id,
     submit_solution,
+    wait_for_submission,
 )
 from yukitools_rime.errors import FileOperationError, LayoutError, ValidationError
 from yukitools_rime.layout import (
@@ -31,6 +32,9 @@ class FakeSubmission:
         self.response = response
         self.submits: list[tuple[int, str, str]] = []
         self.solutions: list[tuple[int, SolutionRequest]] = []
+        self.status_calls = 0
+        self.submission_calls: list[int] = []
+        self.submission_results = [SubmissionInfo("AC", 1)]
         self.saved = object()
 
     def submit(self, problem_id: int, lang: str, source: str) -> str:
@@ -40,6 +44,21 @@ class FakeSubmission:
     def set_solution(self, submission_id: int, request: SolutionRequest) -> object:
         self.solutions.append((submission_id, request))
         return self.saved
+
+    def statuses(self) -> list[StatusInfo]:
+        self.status_calls += 1
+        return [
+            StatusInfo("WJ", "judging"),
+            StatusInfo("Pending", "judging"),
+            StatusInfo("AC", "success"),
+            StatusInfo("WA", "wrong"),
+        ]
+
+    def get_submission(self, submission_id: int) -> SubmissionInfo:
+        self.submission_calls.append(submission_id)
+        if len(self.submission_results) > 1:
+            return self.submission_results.pop(0)
+        return self.submission_results[0]
 
 
 def selection(
@@ -116,6 +135,131 @@ def test_submit_uses_managed_solution_owner_config_and_normalized_source(
     assert result.lang_id == "py"
     assert fake.submits == [(42, "py", "print(1)\n")]
     assert created == [owner]
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def test_submit_waits_using_server_status_categories_and_reports_result(
+    tmp_path: Path,
+) -> None:
+    selected, _ = selection(tmp_path)
+    fake = FakeSubmission('{"submissionId": 77}')
+    fake.submission_results = [
+        SubmissionInfo("", 0),
+        SubmissionInfo("WJ", 0),
+        SubmissionInfo("WA", 234),
+    ]
+    clock = FakeClock()
+
+    result = submit_solution(
+        selected,
+        fake,
+        wait=True,
+        timeout=60,
+        interval=5,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    assert result.submission_id == 77
+    assert result.judge_status == "WA"
+    assert result.run_time_ms == 234
+    assert not result.wait_timed_out
+    assert fake.status_calls == 1
+    assert fake.submission_calls == [77, 77, 77]
+    assert clock.sleeps == [5, 5, 5]
+
+
+def test_submit_callback_preserves_id_before_polling_failure(tmp_path: Path) -> None:
+    selected, _ = selection(tmp_path)
+    fake = FakeSubmission('{"submissionId": 77}')
+    reported: list[tuple[int, int]] = []
+
+    def fail_statuses() -> list[StatusInfo]:
+        assert reported == [(42, 77)]
+        raise RuntimeError("status endpoint failed")
+
+    fake.statuses = fail_statuses  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="status endpoint failed"):
+        submit_solution(
+            selected,
+            fake,
+            wait=True,
+            on_submitted=lambda problem_id, submission_id: reported.append(
+                (problem_id, submission_id)
+            ),
+        )
+
+    assert reported == [(42, 77)]
+    assert fake.submits == [(42, "py", "print(1)\n")]
+
+
+def test_wait_for_submission_times_out_at_deadline() -> None:
+    fake = FakeSubmission()
+    fake.submission_results = [SubmissionInfo("Pending", 0)]
+    clock = FakeClock()
+
+    result = wait_for_submission(
+        fake,
+        123,
+        timeout=12,
+        interval=5,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+
+    assert result is None
+    assert fake.submission_calls == [123, 123, 123]
+    assert clock.sleeps == [5, 5, 2]
+    assert clock.now == 12
+
+
+@pytest.mark.parametrize(
+    ("timeout", "interval", "message"),
+    [
+        (-1, 1, "timeout"),
+        (float("nan"), 1, "timeout"),
+        (float("inf"), 1, "timeout"),
+        (True, 1, "timeout"),
+        (1, 0, "interval"),
+        (1, -1, "interval"),
+        (1, float("nan"), "interval"),
+        (1, True, "interval"),
+    ],
+)
+def test_wait_for_submission_rejects_invalid_polling_values(
+    timeout: float,
+    interval: float,
+    message: str,
+) -> None:
+    fake = FakeSubmission()
+    with pytest.raises(ValidationError, match=message):
+        wait_for_submission(fake, 1, timeout=timeout, interval=interval)
+    assert fake.status_calls == 0
+
+
+def test_submit_no_id_skips_waiting_even_when_requested(tmp_path: Path) -> None:
+    selected, _ = selection(tmp_path)
+    fake = FakeSubmission('{"accepted":true}')
+
+    result = submit_solution(selected, fake, wait=True)
+
+    assert result.submission_id is None
+    assert result.judge_status is None
+    assert not result.wait_timed_out
+    assert fake.status_calls == 0
 
 
 def test_submit_does_not_turn_an_unrecognized_success_response_into_a_retryable_error(

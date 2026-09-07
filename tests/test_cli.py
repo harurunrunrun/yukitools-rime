@@ -10,7 +10,7 @@ import pytest
 
 import yukitools_rime.cli as cli
 from yukitools_rime.api import Language
-from yukitools_rime.errors import UsageError
+from yukitools_rime.errors import UsageError, ValidationError
 from yukitools_rime.testcase_sync import SnapshotChanges
 
 
@@ -287,11 +287,18 @@ def test_submit_and_expected_solution_dispatch(
     monkeypatch.setattr(
         cli,
         "submit_solution",
-        lambda *args: SimpleNamespace(problem_id=1, submission_id=99),
+        lambda *args, **kwargs: SimpleNamespace(
+            problem_id=1,
+            submission_id=99,
+            judge_status="AC",
+            run_time_ms=42,
+            wait_timed_out=False,
+        ),
     )
     stdin, stdout, stderr = streams()
     assert cli.main(["submit"], stdin=stdin, stdout=stdout, stderr=stderr) == 0
     assert "99" in stdout.getvalue()
+    assert "結果: AC (42 ms)" in stdout.getvalue()
 
     monkeypatch.setattr(
         cli,
@@ -318,7 +325,7 @@ def test_submit_reports_success_when_response_has_no_submission_id(
     monkeypatch.setattr(
         cli,
         "submit_solution",
-        lambda *args: SimpleNamespace(
+        lambda *args, **kwargs: SimpleNamespace(
             problem_id=1,
             submission_id=None,
             raw_response='Bearer top-secret {"accepted":true}',
@@ -334,6 +341,74 @@ def test_submit_reports_success_when_response_has_no_submission_id(
     assert "accepted" not in output + errors
     assert "top-secret" not in output + errors
     assert "提出IDをサーバー応答から判別できませんでした" in errors
+
+
+def test_submit_wait_flag_and_timeout_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "resolve_target", lambda target: object())
+    waits: list[bool] = []
+
+    def fake_submit(*args: object, **kwargs: object) -> SimpleNamespace:
+        waits.append(bool(kwargs["wait"]))
+        return SimpleNamespace(
+            problem_id=1,
+            submission_id=99,
+            judge_status=None,
+            run_time_ms=None,
+            wait_timed_out=True,
+        )
+
+    monkeypatch.setattr(cli, "submit_solution", fake_submit)
+    stdin, stdout, stderr = streams()
+    assert cli.main(["submit"], stdin=stdin, stdout=stdout, stderr=stderr) == 0
+    assert waits == [True]
+    assert "10分待っても" in stderr.getvalue()
+
+    stdin, stdout, stderr = streams()
+    assert (
+        cli.main(
+            ["submit", "--no-wait"],
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 0
+    )
+    assert waits == [True, False]
+
+
+def test_submit_reports_id_before_wait_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "resolve_target", lambda target: object())
+
+    def fail_after_submit(*args: object, **kwargs: object) -> object:
+        callback = kwargs["on_submitted"]
+        callback(1, 77)  # type: ignore[operator]
+        raise ValidationError("poll failed")
+
+    monkeypatch.setattr(cli, "submit_solution", fail_after_submit)
+    stdin, stdout, stderr = streams()
+
+    assert cli.main(["submit"], stdin=stdin, stdout=stdout, stderr=stderr) == 1
+    assert "提出ID 77" in stdout.getvalue()
+    assert "https://yukicoder.me/submissions/77" in stdout.getvalue()
+    assert "poll failed" in stderr.getvalue()
+
+
+def test_submit_wait_interrupt_returns_130(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "resolve_target", lambda target: object())
+
+    def interrupt(*args: object, **kwargs: object) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "submit_solution", interrupt)
+    stdin, stdout, stderr = streams()
+    assert cli.main(["submit"], stdin=stdin, stdout=stdout, stderr=stderr) == 130
+    assert "中断しました" in stderr.getvalue()
 
 
 def test_expected_errors_and_interrupt_have_stable_codes(
