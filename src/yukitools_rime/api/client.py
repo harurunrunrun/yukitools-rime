@@ -28,9 +28,15 @@ from yukitools_rime.api.types import (
     ResponseFormatError,
     SaveResponse,
     SolutionRequest,
+    StatusInfo,
+    SubmissionInfo,
+    TestcaseInfo,
+    TestcaseNameRule,
     UploadResponse,
+    ValidatorContent,
+    ValidatorRequest,
     Which,
-    judge_status_is_final,
+    judging_ids,
 )
 from yukitools_rime.auth import validate_token
 from yukitools_rime.models import ProblemSettings, Statement
@@ -426,18 +432,41 @@ class YukicoderClient:
     ) -> JudgeCodeContent | None:
         interval_seconds = _poll_seconds(interval, label="interval", allow_zero=False)
         timeout_seconds = _poll_seconds(timeout, label="timeout", allow_zero=True)
+        judging = judging_ids(self.statuses())
         deadline = monotonic() + timeout_seconds
         last_result: JudgeCodeContent | None = None
         while True:
             result = self.get_judge_code(problem_id)
             if result is not None:
                 last_result = result
-            if result is not None and judge_status_is_final(result.status):
+            if result is not None and result.status and result.status not in judging:
                 return result
             remaining = deadline - monotonic()
             if remaining <= 0:
                 return last_result
             sleep(min(interval_seconds, remaining))
+
+    def get_validator(self, problem_id: int) -> ValidatorContent:
+        pid = _path_id(problem_id, "問題ID")
+        return ValidatorContent.from_api_dict(
+            self._get_json(
+                f"/v1/problems/{pid}/validator",
+                "validator の取得",
+            )
+        )
+
+    def save_validator(
+        self, problem_id: int, request: ValidatorRequest | Mapping[str, object]
+    ) -> JudgeCodeSaveResponse:
+        pid = _path_id(problem_id, "問題ID")
+        operation = "validator の保存"
+        return _parse_write_response(
+            self._put_json(f"/v1/problems/{pid}/validator", request, operation),
+            operation,
+            JudgeCodeSaveResponse.from_api_dict,
+        )
+
+    put_validator = save_validator
 
     def get_editorial(self, problem_id: int) -> EditorialContent:
         pid = _path_id(problem_id, "問題ID")
@@ -472,6 +501,37 @@ class YukicoderClient:
         if names is None:
             raise ResponseFormatError("テストケース一覧に安全でないファイル名があります")
         return names
+
+    def list_testcases_detail(
+        self,
+        problem_id: int,
+        which: Which | str,
+    ) -> list[TestcaseInfo]:
+        pid = _path_id(problem_id, "問題ID")
+        side = _which_value(which)
+        raw = self._get_json(f"/v1/problems/{pid}/file/{side}?detail=1", "テストケース一覧の取得")
+        if not isinstance(raw, list):
+            raise ResponseFormatError("テストケース詳細一覧は配列ではありません")
+        details = [TestcaseInfo.from_api_dict(item) for item in raw]
+        safe = True
+        try:
+            for detail in details:
+                validate_testcase_name(detail.name)
+        except ValueError:
+            safe = False
+        if not safe:
+            raise ResponseFormatError("テストケース一覧に安全でないファイル名があります")
+        return details
+
+    def testcase_name_rule(self) -> str:
+        rule = TestcaseNameRule.from_api_dict(
+            self._get_json(
+                "/v1/testcase_name_rule",
+                "テストケース名の規則の取得",
+                authenticated=False,
+            )
+        )
+        return rule.allowed_chars
 
     def get_testcase(self, problem_id: int, which: Which | str, name: str) -> bytes:
         pid = _path_id(problem_id, "問題ID")
@@ -540,6 +600,10 @@ class YukicoderClient:
         )
         return self._redact(response.text)
 
+    def get_submission(self, submission_id: int) -> SubmissionInfo:
+        sid = _path_id(submission_id, "提出ID")
+        return SubmissionInfo.from_api_dict(self._get_json(f"/v1/submissions/{sid}", "提出の取得"))
+
     def set_solution(
         self, submission_id: int, request: SolutionRequest | Mapping[str, object]
     ) -> SaveResponse:
@@ -552,6 +616,14 @@ class YukicoderClient:
         )
 
     save_solution = set_solution
+
+    def statuses(self) -> list[StatusInfo]:
+        raw = self._get_json("/v1/statuses", "ステータス一覧の取得", authenticated=False)
+        if not isinstance(raw, list):
+            raise ResponseFormatError("ステータス一覧は配列ではありません")
+        return [StatusInfo.from_api_dict(item) for item in raw]
+
+    get_statuses = statuses
 
     def languages(self) -> list[Language]:
         raw = self._get_json("/v1/languages", "言語一覧の取得", authenticated=False)

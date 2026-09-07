@@ -22,7 +22,12 @@ def source_spec(lang_id: str) -> SourceSpec:
     language = lang_id.strip().lower()
     if language.startswith("cpp"):
         return SourceSpec("cpp", "cxx")
-    if language == "c" or _C_LANGUAGE.match(language) or language.startswith("gcc"):
+    if (
+        language == "c"
+        or language.startswith("c_")
+        or _C_LANGUAGE.match(language)
+        or language.startswith("gcc")
+    ):
         return SourceSpec("c", "c")
     if language.startswith("java"):
         return SourceSpec("java", "java")

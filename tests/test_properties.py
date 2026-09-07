@@ -29,8 +29,8 @@ WINDOWS_DEVICES = {
     "NUL",
     *(f"{prefix}{number}" for prefix in ("COM", "LPT") for number in range(1, 10)),
 }
-CASE_PATTERN = re.compile(r"[A-Za-z0-9._]+\Z")
-CASE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._"
+CASE_PATTERN = re.compile(r"[A-Za-z0-9._-]+\Z")
+CASE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
 
 safe_case_names = st.builds(
     lambda first, tail: first + "".join(tail),

@@ -18,8 +18,20 @@ from yukitools_rime.api.types import (
     ResponseFormatError,
     SaveResponse,
     SolutionRequest,
+    StatusInfo,
+    SubmissionInfo,
     UploadResponse,
+    ValidatorCase,
+    ValidatorContent,
+    ValidatorRequest,
     judge_status_is_final,
+    judging_ids,
+)
+from yukitools_rime.api.types import (
+    TestcaseInfo as APITestcaseInfo,
+)
+from yukitools_rime.api.types import (
+    TestcaseNameRule as APITestcaseNameRule,
 )
 from yukitools_rime.models import ProblemSettings, Statement
 
@@ -204,7 +216,107 @@ def test_statement_request_models_use_exclusive_content_fields() -> None:
 
 @pytest.mark.parametrize(
     ("status", "expected"),
-    [("AC", True), ("CE", True), ("WJ", False), ("Judge", False), ("", False)],
+    [("AC", True), ("CE", True), ("WA", True), ("WJ", False), ("Judge", False), ("", False)],
 )
-def test_judge_final_statuses_are_exact(status: str, expected: bool) -> None:
-    assert judge_status_is_final(status) is expected
+def test_judge_final_statuses_follow_server_categories(status: str, expected: bool) -> None:
+    assert judge_status_is_final(status, {"WJ", "Judge"}) is expected
+
+
+def test_validator_models_parse_status_and_failure_details() -> None:
+    content = ValidatorContent.from_api_dict(
+        {
+            "langId": "cpp23",
+            "source": "validator source",
+            "status": "WA",
+            "compileMessage": "warning",
+            "cases": [
+                {"name": "sample-01.txt", "status": "AC"},
+                {"name": "secret.txt", "status": "RE"},
+            ],
+        }
+    )
+
+    assert content == ValidatorContent(
+        lang_id="cpp23",
+        source="validator source",
+        status="WA",
+        compile_message="warning",
+        cases=(
+            ValidatorCase("sample-01.txt", "AC"),
+            ValidatorCase("secret.txt", "RE"),
+        ),
+    )
+    assert content.is_up_to_date({"WJ", "Judge"})
+    assert not ValidatorContent(status="WJ").is_up_to_date({"WJ", "Judge"})
+    assert not ValidatorContent().is_up_to_date(set())
+    assert content.failure_details() == "\n通らなかったケース: secret.txt (RE)"
+    assert ValidatorRequest("cpp23", "source").to_api_dict() == {
+        "langId": "cpp23",
+        "source": "source",
+    }
+
+
+def test_validator_compile_and_bounded_case_failure_details() -> None:
+    compile_error = ValidatorContent(status="CE", compile_message=" error: expected ';' \n")
+    cases = tuple(ValidatorCase(f"{index}.txt", "WA") for index in range(12))
+
+    assert "error: expected ';'" in compile_error.failure_details()
+    assert ValidatorContent(status="CE").failure_details() == ""
+    details = ValidatorContent(status="WA", cases=cases).failure_details()
+    assert "0.txt (WA)" in details
+    assert "9.txt (WA)" in details
+    assert "10.txt (WA)" not in details
+    assert details.endswith("他 2 件")
+    assert (
+        ValidatorContent(status="WA", cases=(ValidatorCase("ok.txt", "AC"),)).failure_details()
+        == ""
+    )
+    assert ValidatorContent(status="WA", cases=None).failure_details() == ""
+
+
+def test_statuses_derive_judging_ids_by_category() -> None:
+    statuses = [
+        StatusInfo.from_api_dict({"id": "WJ", "category": "judging"}),
+        StatusInfo.from_api_dict({"id": "Pending", "category": "judging"}),
+        StatusInfo.from_api_dict({"id": "AC", "category": "success"}),
+        StatusInfo.from_api_dict({"id": "WA", "category": "wrong"}),
+    ]
+
+    assert judging_ids(statuses) == frozenset({"WJ", "Pending"})
+
+
+def test_submission_testcase_and_name_rule_models_parse() -> None:
+    assert SubmissionInfo.from_api_dict({"status": "AC", "runTimeMs": 123}) == SubmissionInfo(
+        status="AC",
+        run_time_ms=123,
+    )
+    assert SubmissionInfo.from_api_dict({}) == SubmissionInfo()
+    assert APITestcaseInfo.from_api_dict(
+        {"name": "case-01.txt", "sha256": "a" * 64, "size": 12}
+    ) == APITestcaseInfo("case-01.txt", "a" * 64)
+    assert APITestcaseNameRule.from_api_dict({"allowedChars": "abc.-"}).allowed_chars == "abc.-"
+
+
+@pytest.mark.parametrize(
+    ("parser", "payload", "key"),
+    [
+        (ValidatorCase.from_api_dict, {"status": "AC"}, "name"),
+        (ValidatorCase.from_api_dict, {"name": "case.txt"}, "status"),
+        (ValidatorContent.from_api_dict, {"cases": {}}, "cases"),
+        (ValidatorContent.from_api_dict, {"cases": [1]}, "JSONオブジェクト"),
+        (StatusInfo.from_api_dict, {"category": "judging"}, "id"),
+        (StatusInfo.from_api_dict, {"id": "WJ"}, "category"),
+        (SubmissionInfo.from_api_dict, {"runTimeMs": True}, "runTimeMs"),
+        (APITestcaseInfo.from_api_dict, {"sha256": "abc"}, "name"),
+        (APITestcaseInfo.from_api_dict, {"name": "case.txt"}, "sha256"),
+        (APITestcaseNameRule.from_api_dict, {}, "allowedChars"),
+        (APITestcaseNameRule.from_api_dict, {"allowedChars": ""}, "allowedChars"),
+    ],
+)
+def test_new_api_models_reject_malformed_shapes(
+    parser: Callable[[object], object],
+    payload: object,
+    key: str,
+) -> None:
+    with pytest.raises(ResponseFormatError, match=key):
+        parser(payload)

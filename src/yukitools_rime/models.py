@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Collection
 from contextlib import suppress
 from dataclasses import dataclass, field, fields, is_dataclass
 from decimal import Decimal, InvalidOperation
@@ -38,7 +39,7 @@ EPS_MODE_LABELS: dict[str, str] = {
 }
 
 _CAMEL_BOUNDARY = re.compile(r"_([a-zA-Z0-9])")
-_SAFE_CASE_NAME = re.compile(r"[A-Za-z0-9._]+\Z")
+_SAFE_CASE_NAME = re.compile(r"[A-Za-z0-9._-]+\Z")
 _SAFE_RIME_OUT_DIR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _WINDOWS_DEVICE_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
@@ -159,7 +160,7 @@ def validate_testcase_name(name: str, *, label: str = "testcase name") -> str:
     validate_basename(name, label=label)
     if name.startswith(".") or _SAFE_CASE_NAME.fullmatch(name) is None:
         raise ValidationError(
-            f"{label} may contain only ASCII letters, digits, '.', and '_': {name!r}"
+            f"{label} may contain only ASCII letters, digits, '.', '_', and '-': {name!r}"
         )
     return name
 
@@ -318,6 +319,7 @@ class ProblemConfig:
     rime_id: str
     reference_solution: str | None = None
     rime_options: dict[str, object] = field(default_factory=dict)
+    sync: bool = True
 
     def __post_init__(self) -> None:
         self.problem_id = _integer(self.problem_id, label="problem_id", minimum=1)
@@ -331,6 +333,7 @@ class ProblemConfig:
         self.rime_options = cast(
             dict[str, object], _literal_mapping(self.rime_options, label="rime_options")
         )
+        self.sync = _boolean(self.sync, label="sync")
 
     def to_api_dict(self) -> dict[str, JsonValue]:
         """Serialize only remote-editable fields; omit identity and Rime metadata."""
@@ -402,6 +405,29 @@ class JudgeConfig:
 
     def to_api_dict(self, *, source: str) -> dict[str, JsonValue]:
         return {"langId": self.lang_id, "source": _string(source, label="judge source")}
+
+
+@dataclass(slots=True)
+class ValidatorConfig:
+    """Input validator declaration stored in a Rime TESTSET."""
+
+    lang_id: str
+    src: str
+    rime_kind: str | None = None
+    rime_options: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.lang_id = _string(self.lang_id, label="lang_id", empty=False)
+        self.src = validate_basename(self.src, label="validator src")
+        if self.src.casefold() == "testset":
+            raise ValidationError("validator src must not name TESTSET")
+        self.rime_kind = _validate_rime_kind(self.rime_kind)
+        self.rime_options = cast(
+            dict[str, object], _literal_mapping(self.rime_options, label="rime_options")
+        )
+
+    def to_api_dict(self, *, source: str) -> dict[str, JsonValue]:
+        return {"langId": self.lang_id, "source": _string(source, label="validator source")}
 
 
 @dataclass(slots=True)
@@ -483,10 +509,10 @@ class Which(StrEnum):
     OUT = "out"
 
 
-def judge_status_is_final(status: str) -> bool:
-    """Return whether a custom-judge compilation reached AC or CE."""
+def judge_status_is_final(status: str, judging_statuses: Collection[str]) -> bool:
+    """Return whether a non-empty status is outside the server's judging category."""
 
-    return status in {"AC", "CE"}
+    return bool(status) and status not in judging_statuses
 
 
 __all__ = [
@@ -504,6 +530,7 @@ __all__ = [
     "ProjectConfig",
     "SolutionConfig",
     "Statement",
+    "ValidatorConfig",
     "Which",
     "judge_status_is_final",
     "normalize_eps",

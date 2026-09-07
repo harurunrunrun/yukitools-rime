@@ -59,14 +59,14 @@ def test_multipart_has_exact_file_and_text_part_shape() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["", ".", "..", ".hidden", "../evil", "a/b", "case-1.txt", "日本語.txt"],
+    ["", ".", "..", ".hidden", "../evil", "a/b", "case 1.txt", "日本語.txt"],
 )
 def test_unsafe_testcase_names_are_rejected(name: str) -> None:
     with pytest.raises(ValueError):
         validate_testcase_name(name)
 
 
-@pytest.mark.parametrize("name", ["1.txt", "sample_01.txt", "many.dots.in"])
+@pytest.mark.parametrize("name", ["1.txt", "sample_01.txt", "many.dots.in", "case-1.txt"])
 def test_safe_testcase_names_are_kept(name: str) -> None:
     assert validate_testcase_name(name) == name
 

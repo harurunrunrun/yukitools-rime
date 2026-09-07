@@ -14,6 +14,7 @@ from yukitools_rime.api import (
     ProblemEditRequest,
     ResponseFormatError,
     SolutionRequest,
+    ValidatorRequest,
     YukicoderClient,
     YukicoderHTTPError,
     YukicoderTransportError,
@@ -738,11 +739,20 @@ class _FakeClock:
         self.now += duration
 
 
-def test_judge_polling_covers_missing_waiting_judging_and_ac() -> None:
-    statuses = iter([None, "WJ", "Judge", "AC"])
+def _judging_response(*ids: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json=[{"id": status, "category": "judging"} for status in ids],
+    )
+
+
+def test_judge_polling_uses_server_categories_until_ac() -> None:
+    statuses = iter([None, "QueuedByServer", "Judge", "AC"])
     clock = _FakeClock()
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/statuses"):
+            return _judging_response("QueuedByServer", "Judge")
         status = next(statuses)
         if status is None:
             return httpx.Response(404)
@@ -770,8 +780,10 @@ def test_judge_polling_timeout_uses_exact_remaining_delay() -> None:
     clock = _FakeClock()
     requests = 0
 
-    def handler(_: httpx.Request) -> httpx.Response:
+    def handler(request: httpx.Request) -> httpx.Response:
         nonlocal requests
+        if request.url.path.endswith("/statuses"):
+            return _judging_response("WJ")
         requests += 1
         return httpx.Response(404)
 
@@ -796,10 +808,15 @@ def test_judge_polling_timeout_uses_exact_remaining_delay() -> None:
 def test_judge_polling_zero_timeout_returns_latest_result_without_sleep() -> None:
     clock = _FakeClock()
 
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/statuses"):
+            return _judging_response("WJ")
+        return httpx.Response(200, json={"status": "WJ"})
+
     with YukicoderClient(
         "token",
         "https://example.test/api",
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"status": "WJ"})),
+        transport=httpx.MockTransport(handler),
     ) as client:
         result = client.wait_for_judge_code(
             1,
@@ -1064,13 +1081,19 @@ def test_anonymous_http_error_redacts_bearer_text() -> None:
     assert "Bearer <redacted>" in str(caught.value)
 
 
-def test_judge_polling_returns_compile_error_immediately() -> None:
+@pytest.mark.parametrize("terminal", ["CE", "IE"])
+def test_judge_polling_returns_any_server_terminal_immediately(terminal: str) -> None:
     clock = _FakeClock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/statuses"):
+            return _judging_response("WJ", "Judge")
+        return httpx.Response(200, json={"status": terminal})
 
     with YukicoderClient(
         "token",
         "https://example.test/api",
-        transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"status": "CE"})),
+        transport=httpx.MockTransport(handler),
     ) as client:
         result = client.wait_for_judge_code(
             1,
@@ -1079,5 +1102,163 @@ def test_judge_polling_returns_compile_error_immediately() -> None:
         )
 
     assert result is not None
-    assert result.status == "CE"
+    assert result.status == terminal
     assert clock.sleeps == []
+
+
+def test_v040_routes_parse_models_and_isolate_anonymous_auth() -> None:
+    seen: list[tuple[str, str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            (
+                request.method,
+                request.url.path,
+                request.url.query.decode(),
+                request.headers.get("authorization"),
+            )
+        )
+        if request.url.path.endswith("/validator") and request.method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "langId": "cpp23",
+                    "source": "validator",
+                    "status": "WA",
+                    "compileMessage": "warning",
+                    "cases": [{"name": "case-01.txt", "status": "WA"}],
+                },
+            )
+        if request.url.path.endswith("/validator") and request.method == "PUT":
+            assert json.loads(request.content) == {
+                "langId": "cpp23",
+                "source": "validator",
+            }
+            return httpx.Response(200, json={"Message": "saved", "status": "WJ"})
+        if request.url.path.endswith("/file/in"):
+            return httpx.Response(
+                200,
+                json=[{"name": "case-01.txt", "sha256": "a" * 64, "size": 12}],
+            )
+        if request.url.path.endswith("/testcase_name_rule"):
+            return httpx.Response(200, json={"allowedChars": "abc.-"})
+        if request.url.path.endswith("/statuses"):
+            return httpx.Response(
+                200,
+                json=[
+                    {"id": "WJ", "category": "judging", "description": "waiting"},
+                    {"id": "AC", "category": "success", "description": "accepted"},
+                ],
+            )
+        if request.url.path.endswith("/submissions/99"):
+            return httpx.Response(200, json={"status": "AC", "runTimeMs": 42})
+        raise AssertionError(f"unexpected route: {request.method} {request.url}")
+
+    with YukicoderClient(
+        "secret",
+        "https://example.test/api",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        validator = client.get_validator(7)
+        assert validator.compile_message == "warning"
+        assert validator.cases is not None
+        assert validator.cases[0].name == "case-01.txt"
+        assert client.put_validator(7, ValidatorRequest("cpp23", "validator")).status == "WJ"
+        details = client.list_testcases_detail(7, Which.IN)
+        assert details[0].sha256 == "a" * 64
+        assert client.testcase_name_rule() == "abc.-"
+        assert client.statuses()[0].category == "judging"
+        assert client.get_submission(99).run_time_ms == 42
+
+    assert [(method, path, query) for method, path, query, _ in seen] == [
+        ("GET", "/api/v1/problems/7/validator", ""),
+        ("PUT", "/api/v1/problems/7/validator", ""),
+        ("GET", "/api/v1/problems/7/file/in", "detail=1"),
+        ("GET", "/api/v1/testcase_name_rule", ""),
+        ("GET", "/api/v1/statuses", ""),
+        ("GET", "/api/v1/submissions/99", ""),
+    ]
+    assert [auth for *_, auth in seen] == [
+        "Bearer secret",
+        "Bearer secret",
+        "Bearer secret",
+        None,
+        None,
+        "Bearer secret",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("method_name", "response"),
+    [
+        ("list_testcases_detail", {}),
+        ("statuses", {}),
+    ],
+)
+def test_v040_list_routes_require_json_arrays(method_name: str, response: object) -> None:
+    with (
+        YukicoderClient(
+            "token",
+            "https://example.test/api",
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=response)),
+        ) as client,
+        pytest.raises(ResponseFormatError),
+    ):
+        method = getattr(client, method_name)
+        if method_name == "list_testcases_detail":
+            method(1, Which.IN)
+        else:
+            method()
+
+
+@pytest.mark.parametrize("payload", [{}, {"allowedChars": ""}, {"allowedChars": 1}])
+def test_testcase_name_rule_requires_a_nonempty_string(payload: object) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json=payload)
+
+    with (
+        YukicoderClient(
+            "token",
+            "https://example.test/api",
+            transport=httpx.MockTransport(handler),
+        ) as client,
+        pytest.raises(ResponseFormatError, match="allowedChars"),
+    ):
+        client.testcase_name_rule()
+
+    assert "authorization" not in seen[0].headers
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [{"name": "../unsafe", "sha256": "a" * 64}],
+        [{"name": "safe.txt"}],
+        [{"name": "safe.txt", "sha256": 1}],
+    ],
+)
+def test_testcase_detail_rejects_unsafe_names_and_bad_shapes(payload: object) -> None:
+    with (
+        YukicoderClient(
+            "token",
+            "https://example.test/api",
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json=payload)),
+        ) as client,
+        pytest.raises(ResponseFormatError),
+    ):
+        client.list_testcases_detail(1, Which.OUT)
+
+
+def test_validator_bad_write_response_reports_unknown_remote_outcome() -> None:
+    with (
+        YukicoderClient(
+            "token",
+            "https://example.test/api",
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"Message": 1})),
+        ) as client,
+        pytest.raises(ResponseFormatError, match="適用結果は不明"),
+    ):
+        client.save_validator(1, ValidatorRequest("cpp23", "source"))

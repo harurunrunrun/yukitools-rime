@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -10,6 +11,8 @@ from yukitools_rime.models import ProblemSettings, Statement, Which
 
 JUDGE_STATUS_OK = "AC"
 JUDGE_STATUS_COMPILE_ERROR = "CE"
+STATUS_CATEGORY_JUDGING = "judging"
+_FAILED_CASES_SHOWN = 10
 
 
 class ResponseFormatError(ValueError):
@@ -141,6 +144,7 @@ class JudgeCodeContent:
     lang_id: str = ""
     source: str = ""
     status: str = ""
+    compile_message: str = ""
 
     @classmethod
     def from_api_dict(cls, raw: object) -> JudgeCodeContent:
@@ -149,6 +153,7 @@ class JudgeCodeContent:
             lang_id=_string(data, "langId"),
             source=_string(data, "source"),
             status=_string(data, "status"),
+            compile_message=_string(data, "compileMessage"),
         )
 
 
@@ -159,6 +164,104 @@ class JudgeCodeRequest:
 
     def to_api_dict(self) -> dict[str, object]:
         return {"langId": self.lang_id, "source": self.source}
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatorCase:
+    name: str
+    status: str
+
+    @classmethod
+    def from_api_dict(cls, raw: object) -> ValidatorCase:
+        data = _mapping(raw, "validatorのケース")
+        return cls(
+            name=_required_string(data, "name"),
+            status=_required_string(data, "status"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatorContent:
+    lang_id: str = ""
+    source: str = ""
+    status: str = ""
+    compile_message: str = ""
+    cases: tuple[ValidatorCase, ...] | None = None
+
+    @classmethod
+    def from_api_dict(cls, raw: object) -> ValidatorContent:
+        data = _mapping(raw, "validator")
+        raw_cases = data.get("cases")
+        if raw_cases is not None and not isinstance(raw_cases, list):
+            raise ResponseFormatError("cases は配列またはnullではありません")
+        cases = (
+            None
+            if raw_cases is None
+            else tuple(ValidatorCase.from_api_dict(item) for item in raw_cases)
+        )
+        return cls(
+            lang_id=_string(data, "langId"),
+            source=_string(data, "source"),
+            status=_string(data, "status"),
+            compile_message=_string(data, "compileMessage"),
+            cases=cases,
+        )
+
+    def is_up_to_date(self, judging: Collection[str]) -> bool:
+        """Return whether validation has reached any terminal result."""
+
+        return bool(self.status) and self.status not in judging
+
+    def failure_details(self) -> str:
+        """Render the bounded failure details returned by the validator API."""
+
+        if self.status == JUDGE_STATUS_COMPILE_ERROR:
+            message = self.compile_message.strip()
+            if not message:
+                return ""
+            return f"\nコンパイルメッセージ (長いと途中で切れます):\n{message}"
+        failed = [
+            f"{case.name} ({case.status})"
+            for case in self.cases or ()
+            if case.status != JUDGE_STATUS_OK
+        ]
+        if not failed:
+            return ""
+        more = (
+            f" 他 {len(failed) - _FAILED_CASES_SHOWN} 件"
+            if len(failed) > _FAILED_CASES_SHOWN
+            else ""
+        )
+        return f"\n通らなかったケース: {', '.join(failed[:_FAILED_CASES_SHOWN])}{more}"
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatorRequest:
+    lang_id: str
+    source: str
+
+    def to_api_dict(self) -> dict[str, object]:
+        return {"langId": self.lang_id, "source": self.source}
+
+
+@dataclass(frozen=True, slots=True)
+class StatusInfo:
+    id: str
+    category: str
+
+    @classmethod
+    def from_api_dict(cls, raw: object) -> StatusInfo:
+        data = _mapping(raw, "ジャッジステータス")
+        return cls(
+            id=_required_string(data, "id"),
+            category=_required_string(data, "category"),
+        )
+
+
+def judging_ids(statuses: Iterable[StatusInfo]) -> frozenset[str]:
+    """Derive the non-terminal status IDs from the server's categories."""
+
+    return frozenset(status.id for status in statuses if status.category == STATUS_CATEGORY_JUDGING)
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,13 +355,57 @@ class Language:
         )
 
 
-def judge_status_is_final(status: str) -> bool:
-    return status in {JUDGE_STATUS_OK, JUDGE_STATUS_COMPILE_ERROR}
+@dataclass(frozen=True, slots=True)
+class SubmissionInfo:
+    status: str = ""
+    run_time_ms: int = 0
+
+    @classmethod
+    def from_api_dict(cls, raw: object) -> SubmissionInfo:
+        data = _mapping(raw, "提出")
+        return cls(
+            status=_string(data, "status"),
+            run_time_ms=_integer(data, "runTimeMs"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TestcaseNameRule:
+    allowed_chars: str
+
+    @classmethod
+    def from_api_dict(cls, raw: object) -> TestcaseNameRule:
+        data = _mapping(raw, "テストケース名の規則")
+        allowed_chars = _required_string(data, "allowedChars")
+        if not allowed_chars:
+            raise ResponseFormatError("allowedChars が空です")
+        return cls(allowed_chars=allowed_chars)
+
+
+@dataclass(frozen=True, slots=True)
+class TestcaseInfo:
+    name: str
+    sha256: str
+
+    @classmethod
+    def from_api_dict(cls, raw: object) -> TestcaseInfo:
+        data = _mapping(raw, "テストケース情報")
+        return cls(
+            name=_required_string(data, "name"),
+            sha256=_required_string(data, "sha256"),
+        )
+
+
+def judge_status_is_final(status: str, judging_statuses: Collection[str]) -> bool:
+    """Return whether a non-empty status is outside the server's judging category."""
+
+    return bool(status) and status not in judging_statuses
 
 
 __all__ = [
     "JUDGE_STATUS_COMPILE_ERROR",
     "JUDGE_STATUS_OK",
+    "STATUS_CATEGORY_JUDGING",
     "EditorialContent",
     "EditorialRequest",
     "GeneratorContent",
@@ -272,7 +419,15 @@ __all__ = [
     "ResponseFormatError",
     "SaveResponse",
     "SolutionRequest",
+    "StatusInfo",
+    "SubmissionInfo",
+    "TestcaseInfo",
+    "TestcaseNameRule",
     "UploadResponse",
+    "ValidatorCase",
+    "ValidatorContent",
+    "ValidatorRequest",
     "Which",
     "judge_status_is_final",
+    "judging_ids",
 ]

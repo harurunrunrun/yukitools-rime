@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
-from collections.abc import Callable, Iterable, Iterator, Mapping
+import string
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +31,7 @@ from yukitools_rime.models import Which, validate_testcase_name
 MAX_UPLOAD_FILES = 100
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 MULTIPART_FILE_OVERHEAD = 512
+DEFAULT_SERVER_CASE_CHARS = string.ascii_letters + "._-" + string.digits
 
 TestcaseSnapshot = Mapping[str, TestCaseData]
 
@@ -99,10 +102,27 @@ class _StagedTestcaseSnapshot(Mapping[str, TestCaseData]):
         return len(self._names)
 
 
+def _discard_staged_children(root: Path) -> None:
+    """Best-effort cleanup without masking the original staging failure."""
+
+    with suppress(BaseException):
+        children = tuple(root.iterdir())
+        for path in children:
+            with suppress(BaseException):
+                if path.is_dir() and not path.is_symlink():
+                    discard_tree(path)
+                else:
+                    path.unlink(missing_ok=True)
+
+
 class TestcaseAPI(Protocol):
     """The small YukicoderClient surface needed by testcase synchronization."""
 
     def list_testcases(self, problem_id: int, which: Which | str) -> list[str]: ...
+
+    def list_testcases_detail(self, problem_id: int, which: Which | str) -> Sequence[object]: ...
+
+    def testcase_name_rule(self) -> str: ...
 
     def get_testcase(self, problem_id: int, which: Which | str, name: str) -> bytes: ...
 
@@ -157,10 +177,190 @@ class PullResult:
 
 @dataclass(frozen=True, slots=True)
 class PushResult:
+    """Push outcome; the snapshot contains synchronized local testcase names only."""
+
     remote_snapshot: TestcaseSnapshot
     uploaded_inputs: int
     uploaded_outputs: int
     pruned: int
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteTestcaseHashes:
+    inputs: Mapping[str, str]
+    outputs: Mapping[str, str]
+
+    @property
+    def names(self) -> frozenset[str]:
+        return frozenset(self.inputs) | frozenset(self.outputs)
+
+    @property
+    def complete_names(self) -> frozenset[str]:
+        return frozenset(self.inputs) & frozenset(self.outputs)
+
+    def require_complete(self) -> tuple[str, ...]:
+        return _require_paired_remote_names(
+            tuple(sorted(self.inputs)),
+            tuple(sorted(self.outputs)),
+        )
+
+    def matches(self, which: Which, name: str, content: bytes) -> bool:
+        """Return whether raw bytes have the digest reported for one remote side."""
+
+        hashes = self.inputs if which is Which.IN else self.outputs
+        return hashes.get(name) == _sha256(content)
+
+
+def _server_allowed_chars(client: TestcaseAPI) -> str:
+    getter = getattr(client, "testcase_name_rule", None)
+    if not callable(getter):
+        return DEFAULT_SERVER_CASE_CHARS
+    allowed = getter()
+    if not isinstance(allowed, str) or not allowed:
+        raise ValidationError("testcase name rule did not return a non-empty string")
+    return allowed
+
+
+def _validate_server_name(name: str, allowed_chars: str, *, label: str) -> str:
+    validate_testcase_name(name, label=label)
+    converted = "".join(character for character in name if character in allowed_chars)
+    if converted != name:
+        replacement = repr(converted) if converted else "an empty name"
+        raise ValidationError(f"{label} {name!r} would be stored by yukicoder as {replacement}")
+    return name
+
+
+def validate_testcase_names_for_server(
+    client: TestcaseAPI,
+    names: Iterable[str],
+) -> None:
+    """Reject names that the server would silently rewrite."""
+
+    allowed = _server_allowed_chars(client)
+    for name in names:
+        _validate_server_name(name, allowed, label="testcase name")
+
+
+def validate_snapshot_names_for_server(
+    client: TestcaseAPI,
+    snapshot: Mapping[str, TestCaseData],
+) -> None:
+    """Reject names that the server would silently rewrite before uploading."""
+
+    validate_testcase_names_for_server(client, snapshot)
+
+
+def _detail_map(raw: object, *, side: Which) -> dict[str, str]:
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes, bytearray)):
+        raise ValidationError(f"remote {side.value} testcase details are not a sequence")
+    result: dict[str, str] = {}
+    spellings: dict[str, str] = {}
+    for item in raw:
+        name = getattr(item, "name", None)
+        digest = getattr(item, "sha256", None)
+        if not isinstance(name, str) or not isinstance(digest, str):
+            raise ValidationError(f"remote {side.value} testcase details have an invalid entry")
+        validate_testcase_name(name, label=f"remote {side.value} name")
+        if len(digest) != 64 or any(character not in string.hexdigits for character in digest):
+            raise ValidationError(f"remote {side.value} testcase {name!r} has an invalid sha256")
+        if name in result:
+            raise ValidationError(f"remote {side.value} testcase details contain duplicate names")
+        previous = spellings.setdefault(name.casefold(), name)
+        if previous != name:
+            raise ValidationError(
+                f"remote {side.value} testcase details contain case-insensitive duplicates"
+            )
+        result[name] = digest.lower()
+    return result
+
+
+def fetch_remote_hashes(
+    client: TestcaseAPI,
+    problem_id: int,
+) -> RemoteTestcaseHashes | None:
+    """Fetch side-specific SHA-256 maps when the client supports detail listings."""
+
+    getter = getattr(client, "list_testcases_detail", None)
+    if not callable(getter):
+        return None
+    return RemoteTestcaseHashes(
+        _detail_map(getter(problem_id, Which.IN), side=Which.IN),
+        _detail_map(getter(problem_id, Which.OUT), side=Which.OUT),
+    )
+
+
+def _sha256(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _reuse_or_fetch_side(
+    client: TestcaseAPI,
+    problem_id: int,
+    which: Which,
+    details: Mapping[str, str],
+    reuse: Mapping[str, TestCaseData],
+) -> dict[str, bytes]:
+    result: dict[str, bytes] = {}
+    for name, digest in details.items():
+        previous = reuse.get(name)
+        candidate = None
+        if previous is not None:
+            candidate = previous.input if which is Which.IN else previous.output
+        if candidate is not None and _sha256(candidate) == digest:
+            result[name] = candidate
+            continue
+        data = client.get_testcase(problem_id, which, name)
+        if not isinstance(data, bytes):
+            raise ValidationError(f"remote testcase {name!r} did not return raw bytes")
+        if _sha256(data) != digest:
+            raise ValidationError(
+                f"remote {which.value} testcase {name!r} does not match its sha256"
+            )
+        result[name] = data
+    return result
+
+
+def _reuse_or_fetch_body(
+    client: TestcaseAPI,
+    problem_id: int,
+    which: Which,
+    name: str,
+    *,
+    digest: str | None,
+    candidate: bytes | None,
+) -> bytes:
+    if digest is not None and candidate is not None and _sha256(candidate) == digest:
+        return candidate
+    data = client.get_testcase(problem_id, which, name)
+    if not isinstance(data, bytes):
+        raise ValidationError(f"remote testcase {name!r} did not return raw bytes")
+    if digest is not None and _sha256(data) != digest:
+        raise ValidationError(f"remote {which.value} testcase {name!r} does not match its sha256")
+    return data
+
+
+def _requested_remote_names(names: Iterable[str] | None) -> frozenset[str] | None:
+    if names is None:
+        return None
+    return frozenset(
+        validate_testcase_name(name, label="requested remote testcase name") for name in names
+    )
+
+
+def _select_remote_names(
+    names: Iterable[str],
+    requested: frozenset[str] | None,
+) -> tuple[str, ...]:
+    return tuple(names) if requested is None else tuple(name for name in names if name in requested)
+
+
+def _select_remote_details(
+    details: Mapping[str, str],
+    requested: frozenset[str] | None,
+) -> Mapping[str, str]:
+    if requested is None:
+        return details
+    return {name: digest for name, digest in details.items() if name in requested}
 
 
 def _remote_names(names: list[str], *, side: Which) -> tuple[str, ...]:
@@ -219,19 +419,50 @@ def _fetch_remote_case(
     return TestCaseData(name, input_data, output_data)
 
 
-def fetch_remote_snapshot(client: TestcaseAPI, problem_id: int) -> TestcaseSnapshot:
-    """Fetch a byte-exact remote snapshot into memory."""
+def fetch_remote_snapshot(
+    client: TestcaseAPI,
+    problem_id: int,
+    *,
+    reuse: Mapping[str, TestCaseData] | None = None,
+) -> TestcaseSnapshot:
+    """Fetch a byte-exact remote snapshot, reusing hash-identical local bytes."""
 
-    return {
-        name: _fetch_remote_case(client, problem_id, name)
-        for name in _paired_remote_names(client, problem_id)
-    }
+    details = fetch_remote_hashes(client, problem_id)
+    if details is None:
+        return {
+            name: _fetch_remote_case(client, problem_id, name)
+            for name in _paired_remote_names(client, problem_id)
+        }
+    names = details.require_complete()
+    reusable = reuse or {}
+    inputs = _reuse_or_fetch_side(client, problem_id, Which.IN, details.inputs, reusable)
+    outputs = _reuse_or_fetch_side(client, problem_id, Which.OUT, details.outputs, reusable)
+    return {name: TestCaseData(name, inputs[name], outputs[name]) for name in names}
 
 
-def fetch_remote_sides(client: TestcaseAPI, problem_id: int) -> RemoteTestcaseSides:
-    """Fetch inputs and outputs independently for repair-oriented push operations."""
+def fetch_remote_sides(
+    client: TestcaseAPI,
+    problem_id: int,
+    *,
+    reuse: Mapping[str, TestCaseData] | None = None,
+    names: Iterable[str] | None = None,
+) -> RemoteTestcaseSides:
+    """Fetch selected sides, reusing hash-identical local bytes when possible."""
+
+    requested = _requested_remote_names(names)
+    details = fetch_remote_hashes(client, problem_id)
+    if details is not None:
+        reusable = reuse or {}
+        input_details = _select_remote_details(details.inputs, requested)
+        output_details = _select_remote_details(details.outputs, requested)
+        return RemoteTestcaseSides(
+            _reuse_or_fetch_side(client, problem_id, Which.IN, input_details, reusable),
+            _reuse_or_fetch_side(client, problem_id, Which.OUT, output_details, reusable),
+        )
 
     input_names, output_names = _remote_side_names(client, problem_id)
+    input_names = _select_remote_names(input_names, requested)
+    output_names = _select_remote_names(output_names, requested)
 
     def fetch(which: Which, names: tuple[str, ...]) -> dict[str, bytes]:
         result: dict[str, bytes] = {}
@@ -252,6 +483,8 @@ def fetch_remote_snapshot_to(
     client: TestcaseAPI,
     problem_id: int,
     directory: str | Path,
+    *,
+    reuse: Mapping[str, TestCaseData] | None = None,
 ) -> TestcaseSnapshot:
     """Fetch a snapshot to an empty staging directory and return a lazy mapping."""
 
@@ -273,20 +506,42 @@ def fetch_remote_snapshot_to(
             f"could not prepare testcase staging directory {display_path(root)}: {exc}"
         ) from exc
 
-    names = _paired_remote_names(client, problem_id)
-    written: list[Path] = []
+    details = fetch_remote_hashes(client, problem_id)
+    if details is None:
+        names = _paired_remote_names(client, problem_id)
+    else:
+        names = details.require_complete()
+    reusable = reuse or {}
     try:
         for name in names:
-            case = _fetch_remote_case(client, problem_id, name)
+            previous = reusable.get(name)
+            input_digest = None if details is None else details.inputs[name]
+            output_digest = None if details is None else details.outputs[name]
+            input_candidate = None if previous is None else previous.input
+            output_candidate = None if previous is None else previous.output
             input_path, output_path = local_testcase_paths(root, name)
-            atomic_write_bytes(input_path, case.input, create_parents=False)
-            written.append(input_path)
-            atomic_write_bytes(output_path, case.output, create_parents=False)
-            written.append(output_path)
+            input_data = _reuse_or_fetch_body(
+                client,
+                problem_id,
+                Which.IN,
+                name,
+                digest=input_digest,
+                candidate=input_candidate,
+            )
+            atomic_write_bytes(input_path, input_data, create_parents=False)
+            output_data = _reuse_or_fetch_body(
+                client,
+                problem_id,
+                Which.OUT,
+                name,
+                digest=output_digest,
+                candidate=output_candidate,
+            )
+            atomic_write_bytes(output_path, output_data, create_parents=False)
     except BaseException:
-        for path in reversed(written):
-            with suppress(OSError):
-                path.unlink(missing_ok=True)
+        # The directory was required to be empty, so every direct child belongs
+        # to this attempt.  Clean it even when a mocked writer mutates then raises.
+        _discard_staged_children(root)
         raise
     return _StagedTestcaseSnapshot(root, names)
 
@@ -445,7 +700,7 @@ def pull_testcases(
     if existed:
         local, missing_outputs, missing_inputs = inspect_testcases(target)
         incomplete = missing_outputs + missing_inputs
-    remote = fetch_remote_snapshot(client, problem_id)
+    remote = fetch_remote_snapshot(client, problem_id, reuse=local)
     changes = compare_snapshots(local, remote, incomplete=incomplete)
     if not changes.has_changes:
         return PullResult(remote, changes, applied=False)
@@ -507,46 +762,70 @@ def push_testcases(
 
     target = Path(directory)
     local = read_testcases(target, require_nonempty=True)
-    remote = fetch_remote_sides(client, problem_id)
-    input_uploads = {
-        name: case.input
-        for name, case in local.items()
-        if name not in remote.inputs or remote.inputs[name] != case.input
-    }
-    output_uploads = {
-        name: case.output
-        for name, case in local.items()
-        if name not in remote.outputs or remote.outputs[name] != case.output
-    }
+    validate_snapshot_names_for_server(client, local)
+    details = fetch_remote_hashes(client, problem_id)
+    if details is None:
+        remote = fetch_remote_sides(client, problem_id)
+        input_uploads = {
+            name: case.input
+            for name, case in local.items()
+            if name not in remote.inputs or remote.inputs[name] != case.input
+        }
+        output_uploads = {
+            name: case.output
+            for name, case in local.items()
+            if name not in remote.outputs or remote.outputs[name] != case.output
+        }
+        remote_input_names = set(remote.inputs)
+        remote_output_names = set(remote.outputs)
+    else:
+        input_uploads = {
+            name: case.input
+            for name, case in local.items()
+            if details.inputs.get(name) != _sha256(case.input)
+        }
+        output_uploads = {
+            name: case.output
+            for name, case in local.items()
+            if details.outputs.get(name) != _sha256(case.output)
+        }
+        remote_input_names = set(details.inputs)
+        remote_output_names = set(details.outputs)
     for batch in batch_upload_files(input_uploads):
         client.upload_testcases(problem_id, Which.IN, batch)
     for batch in batch_upload_files(output_uploads):
         client.upload_testcases(problem_id, Which.OUT, batch)
 
-    stale_inputs = tuple(sorted(set(remote.inputs) - set(local))) if prune else ()
-    stale_outputs = tuple(sorted(set(remote.outputs) - set(local))) if prune else ()
+    stale_inputs = tuple(sorted(remote_input_names - set(local))) if prune else ()
+    stale_outputs = tuple(sorted(remote_output_names - set(local))) if prune else ()
     for name in stale_inputs:
         client.delete_testcase(problem_id, Which.IN, name)
     for name in stale_outputs:
         client.delete_testcase(problem_id, Which.OUT, name)
 
-    normalized = fetch_remote_sides(client, problem_id)
     uploaded_input_names = set(input_uploads)
     uploaded_output_names = set(output_uploads)
     uploaded_names = uploaded_input_names | uploaded_output_names
-    normalized_uploaded = normalized.require_complete(uploaded_names)
     refreshed = dict(local)
-    for name in uploaded_names:
-        local_case = local[name]
-        normalized_case = normalized_uploaded[name]
-        refreshed[name] = TestCaseData(
-            name,
-            normalized_case.input if name in uploaded_input_names else local_case.input,
-            (normalized_case.output if name in uploaded_output_names else local_case.output),
+    if uploaded_names:
+        normalized = fetch_remote_sides(
+            client,
+            problem_id,
+            reuse=local,
+            names=uploaded_names,
         )
+        normalized_uploaded = normalized.require_complete(uploaded_names)
+        for name in uploaded_names:
+            local_case = local[name]
+            normalized_case = normalized_uploaded[name]
+            refreshed[name] = TestCaseData(
+                name,
+                normalized_case.input if name in uploaded_input_names else local_case.input,
+                (normalized_case.output if name in uploaded_output_names else local_case.output),
+            )
     replace_local_snapshot(target, refreshed)
     return PushResult(
-        normalized.complete_snapshot(),
+        refreshed,
         uploaded_inputs=len(input_uploads),
         uploaded_outputs=len(output_uploads),
         pruned=len(set(stale_inputs) | set(stale_outputs)),
@@ -554,12 +833,14 @@ def push_testcases(
 
 
 __all__ = [
+    "DEFAULT_SERVER_CASE_CHARS",
     "MAX_UPLOAD_BYTES",
     "MAX_UPLOAD_FILES",
     "MULTIPART_FILE_OVERHEAD",
     "ConfirmReplacement",
     "PullResult",
     "PushResult",
+    "RemoteTestcaseHashes",
     "RemoteTestcaseSides",
     "SnapshotChanges",
     "TestcaseAPI",
@@ -567,10 +848,13 @@ __all__ = [
     "batch_upload_files",
     "compare_snapshots",
     "estimate_upload_size",
+    "fetch_remote_hashes",
     "fetch_remote_sides",
     "fetch_remote_snapshot",
     "fetch_remote_snapshot_to",
     "pull_testcases",
     "push_testcases",
     "replace_local_snapshot",
+    "validate_snapshot_names_for_server",
+    "validate_testcase_names_for_server",
 ]

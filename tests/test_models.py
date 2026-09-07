@@ -111,10 +111,14 @@ def test_basename_rejects_paths(name: str) -> None:
         validate_basename(name)
 
 
-@pytest.mark.parametrize("name", [".hidden", "space name", "日本語", "a-b"])
+@pytest.mark.parametrize("name", [".hidden", "space name", "日本語"])
 def test_testcase_name_rejects_unsafe_alphabet(name: str) -> None:
     with pytest.raises(ValidationError):
         validate_testcase_name(name)
+
+
+def test_testcase_name_accepts_server_hyphen() -> None:
+    assert validate_testcase_name("case-01.txt") == "case-01.txt"
 
 
 @pytest.mark.parametrize(
@@ -149,7 +153,8 @@ def test_project_accepts_portable_rime_output_names(rime_out_dir: str) -> None:
 def test_project_and_enums() -> None:
     assert ProjectConfig(base_url="https://example.test/api/").base_url.endswith("/api")
     assert str(Which.OUT) == "out"
-    assert judge_status_is_final("AC") and not judge_status_is_final("Judge")
+    judging = {"Judge", "WJ"}
+    assert judge_status_is_final("AC", judging) and not judge_status_is_final("Judge", judging)
 
 
 @pytest.mark.parametrize(

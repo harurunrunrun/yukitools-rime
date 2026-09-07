@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 
 from yukitools_rime import files as files_module
 from yukitools_rime import testcase_sync as testcase_sync_module
+from yukitools_rime.api import TestcaseInfo as RemoteCaseInfo
 from yukitools_rime.errors import ConflictError, FileOperationError, ValidationError
 from yukitools_rime.layout import TestCaseData as CaseData
 from yukitools_rime.models import Which
@@ -21,6 +23,7 @@ from yukitools_rime.testcase_sync import (
     pull_testcases,
     push_testcases,
     replace_local_snapshot,
+    validate_snapshot_names_for_server,
 )
 
 
@@ -72,6 +75,34 @@ class FakeAPI:
         del self.data[side][name]
 
 
+class DetailedAPI(FakeAPI):
+    def __init__(
+        self,
+        inputs: Mapping[str, bytes] | None = None,
+        outputs: Mapping[str, bytes] | None = None,
+        *,
+        normalize: bool = False,
+        allowed_chars: str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._-0123456789",
+    ) -> None:
+        super().__init__(inputs, outputs, normalize=normalize)
+        self.allowed_chars = allowed_chars
+        self.detail_calls: list[str] = []
+        self.rule_calls = 0
+
+    def list_testcases_detail(self, problem_id: int, which: Which | str) -> list[RemoteCaseInfo]:
+        assert problem_id == 42
+        side = self.side(which)
+        self.detail_calls.append(side)
+        return [
+            RemoteCaseInfo(name, hashlib.sha256(content).hexdigest())
+            for name, content in reversed(tuple(self.data[side].items()))
+        ]
+
+    def testcase_name_rule(self) -> str:
+        self.rule_calls += 1
+        return self.allowed_chars
+
+
 def case(name: str, input_data: bytes = b"in", output_data: bytes = b"out") -> CaseData:
     return CaseData(name, input_data, output_data)
 
@@ -108,6 +139,200 @@ def test_fetch_rejects_unsafe_names_but_preserves_empty_remote_bytes() -> None:
         fetch_remote_snapshot(FakeAPI({"bad name": b"x"}, {"bad name": b"y"}), 42)
     snapshot = fetch_remote_snapshot(FakeAPI({"a": b""}, {"a": b"y"}), 42)
     assert snapshot["a"] == case("a", b"", b"y")
+
+
+def test_detail_fetch_reuses_matching_bodies_and_downloads_only_changes() -> None:
+    api = DetailedAPI(
+        {"same": b"same-in", "change": b"remote-in"},
+        {"same": b"same-out", "change": b"same-out"},
+    )
+    reusable = {
+        "same": case("same", b"same-in", b"same-out"),
+        "change": case("change", b"local-in", b"same-out"),
+    }
+
+    snapshot = fetch_remote_snapshot(api, 42, reuse=reusable)
+
+    assert snapshot["change"] == case("change", b"remote-in", b"same-out")
+    assert api.detail_calls == ["in", "out"]
+    assert api.gets == [("in", "change")]
+    assert api.list_calls == 0
+
+
+def test_detail_fetch_accepts_the_protocol_sequence_type() -> None:
+    api = DetailedAPI({"sample": b"in"}, {"sample": b"out"})
+    details = api.list_testcases_detail
+
+    def tuple_details(problem_id: int, which: Which | str) -> tuple[RemoteCaseInfo, ...]:
+        return tuple(details(problem_id, which))
+
+    api.list_testcases_detail = tuple_details  # type: ignore[method-assign]
+    assert fetch_remote_snapshot(api, 42) == {"sample": case("sample")}
+
+
+def test_detail_fetch_rejects_invalid_or_mismatched_hashes() -> None:
+    invalid = DetailedAPI({"sample": b"in"}, {"sample": b"out"})
+    invalid.list_testcases_detail = lambda _pid, _which: [  # type: ignore[method-assign]
+        RemoteCaseInfo("sample", "not-a-sha")
+    ]
+    with pytest.raises(ValidationError, match="invalid sha256"):
+        fetch_remote_snapshot(invalid, 42)
+
+    mismatched = DetailedAPI({"sample": b"in"}, {"sample": b"out"})
+    details = mismatched.list_testcases_detail
+
+    def wrong_body_hash(problem_id: int, which: Which | str) -> list[RemoteCaseInfo]:
+        values = details(problem_id, which)
+        if DetailedAPI.side(which) == "in":
+            return [RemoteCaseInfo("sample", hashlib.sha256(b"other").hexdigest())]
+        return values
+
+    mismatched.list_testcases_detail = wrong_body_hash  # type: ignore[method-assign]
+    with pytest.raises(ValidationError, match="does not match its sha256"):
+        fetch_remote_snapshot(mismatched, 42)
+
+
+def test_pull_hash_details_skip_unchanged_body_downloads(tmp_path: Path) -> None:
+    target = tmp_path / "cases"
+    write_case(target, case("case-01"))
+    api = DetailedAPI({"case-01": b"in"}, {"case-01": b"out"})
+
+    result = pull_testcases(api, 42, target)
+
+    assert not result.changes.has_changes
+    assert api.gets == []
+    assert api.detail_calls == ["in", "out"]
+
+
+def test_server_name_rule_rejects_rewritten_name_before_remote_mutation(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "cases"
+    write_case(target, case("case-01"))
+    api = DetailedAPI(
+        allowed_chars=("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._0123456789")
+    )
+
+    with pytest.raises(ValidationError, match="would be stored"):
+        push_testcases(api, 42, target)
+
+    assert api.rule_calls == 1
+    assert api.detail_calls == []
+    assert api.uploads == []
+    with pytest.raises(ValidationError, match="would be stored"):
+        validate_snapshot_names_for_server(api, {"case-01": case("case-01")})
+
+
+def test_server_name_rule_rejects_empty_allowed_character_set() -> None:
+    api = DetailedAPI(allowed_chars="")
+    with pytest.raises(ValidationError, match="non-empty string"):
+        validate_snapshot_names_for_server(api, {"sample": case("sample")})
+    assert api.rule_calls == 1
+
+
+@pytest.mark.parametrize("with_details", [False, True])
+def test_fetch_remote_sides_filters_body_downloads(
+    with_details: bool,
+) -> None:
+    api: FakeAPI
+    if with_details:
+        api = DetailedAPI(
+            {"wanted": b"wanted-in", "remote-only": b"remote-in"},
+            {"wanted": b"wanted-out", "remote-only": b"remote-out"},
+        )
+    else:
+        api = FakeAPI(
+            {"wanted": b"wanted-in", "remote-only": b"remote-in"},
+            {"wanted": b"wanted-out", "remote-only": b"remote-out"},
+        )
+
+    remote = fetch_remote_sides(api, 42, names={"wanted"})
+
+    assert remote.inputs == {"wanted": b"wanted-in"}
+    assert remote.outputs == {"wanted": b"wanted-out"}
+    assert api.gets == [("in", "wanted"), ("out", "wanted")]
+    assert not any(name == "remote-only" for _side, name in api.gets)
+
+
+def test_fetch_remote_sides_with_detail_and_no_filter_fetches_all_names() -> None:
+    api = DetailedAPI({"first": b"fi", "second": b"si"}, {"first": b"fo", "second": b"so"})
+    remote = fetch_remote_sides(api, 42)
+    assert remote.inputs == {"first": b"fi", "second": b"si"}
+    assert remote.outputs == {"first": b"fo", "second": b"so"}
+    assert set(api.gets) == {("in", "first"), ("in", "second"), ("out", "first"), ("out", "second")}
+
+
+def test_fetch_to_streams_each_case_with_detail_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    api = DetailedAPI(
+        {"first": b"first-in", "second": b"second-in"},
+        {"first": b"first-out", "second": b"second-out"},
+    )
+    get_testcase = api.get_testcase
+
+    def observe_streaming(
+        problem_id: int,
+        which: Which | str,
+        name: str,
+    ) -> bytes:
+        if name == "second" and DetailedAPI.side(which) == "in":
+            assert (stage / "first.in").read_bytes() == b"first-in"
+            assert (stage / "first.diff").read_bytes() == b"first-out"
+        return get_testcase(problem_id, which, name)
+
+    api.get_testcase = observe_streaming  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        testcase_sync_module,
+        "fetch_remote_snapshot",
+        lambda *_args, **_kwargs: pytest.fail("must not build an in-memory snapshot"),
+    )
+
+    snapshot = fetch_remote_snapshot_to(
+        api,
+        42,
+        stage,
+        reuse={"first": case("first", b"first-in", b"first-out")},
+    )
+
+    assert tuple(snapshot) == ("first", "second")
+    assert api.gets == [("in", "second"), ("out", "second")]
+
+
+def test_fetch_to_hash_mismatch_rolls_back_streamed_files(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    api = DetailedAPI(
+        {"first": b"first-in", "second": b"second-in"},
+        {"first": b"first-out", "second": b"second-out"},
+    )
+    details = api.list_testcases_detail
+
+    def mismatched_details(
+        problem_id: int,
+        which: Which | str,
+    ) -> list[RemoteCaseInfo]:
+        values = details(problem_id, which)
+        if DetailedAPI.side(which) == "out":
+            return [
+                RemoteCaseInfo(
+                    item.name,
+                    hashlib.sha256(b"different").hexdigest()
+                    if item.name == "second"
+                    else item.sha256,
+                )
+                for item in values
+            ]
+        return values
+
+    api.list_testcases_detail = mismatched_details  # type: ignore[method-assign]
+    with pytest.raises(ValidationError, match="does not match its sha256"):
+        fetch_remote_snapshot_to(api, 42, stage)
+
+    assert tuple(stage.iterdir()) == ()
 
 
 def test_fetch_to_stages_exact_bytes_and_reads_values_lazily(tmp_path: Path) -> None:
@@ -289,6 +514,32 @@ def test_push_uploads_prunes_and_refetches_normalized_bytes(tmp_path: Path) -> N
     assert (target / "README").read_text() == "artifact"
     assert not (target / "stale.in").exists()
     assert api.list_calls == 4
+
+
+def test_push_uses_detail_hashes_and_downloads_only_server_adjustments(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "cases"
+    write_case(target, case("sample", b"new\r\n", b"same-out"))
+    api = DetailedAPI(
+        {"sample": b"old-in", "remote-only": b"remote-in"},
+        {"sample": b"same-out", "remote-only": b"remote-out"},
+        normalize=True,
+    )
+
+    result = push_testcases(api, 42, target)
+
+    assert result.uploaded_inputs == 1
+    assert result.uploaded_outputs == 0
+    assert api.uploads == [("in", ("sample",))]
+    assert api.gets == [("in", "sample")]
+    assert not any(name == "remote-only" for _side, name in api.gets)
+    assert api.detail_calls == ["in", "out", "in", "out"]
+    assert api.list_calls == 0
+    assert api.rule_calls == 1
+    assert "remote-only" not in result.remote_snapshot
+    assert (target / "sample.in").read_bytes() == b"new\n"
+    assert (target / "sample.diff").read_bytes() == b"same-out"
 
 
 def test_push_without_prune_does_not_import_remote_only_case(tmp_path: Path) -> None:
@@ -697,9 +948,9 @@ def test_fetch_to_removes_partial_files_after_body_write_failure(
     ) -> None:
         nonlocal writes
         writes += 1
+        write(path, data, create_parents=create_parents)
         if writes == 2:
             raise KeyboardInterrupt
-        write(path, data, create_parents=create_parents)
 
     monkeypatch.setattr(testcase_sync_module, "atomic_write_bytes", fail_second_write)
     with pytest.raises(KeyboardInterrupt):
