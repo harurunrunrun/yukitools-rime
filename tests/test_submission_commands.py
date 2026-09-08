@@ -4,15 +4,17 @@ from pathlib import Path
 
 import pytest
 
+import yukitools_rime.commands.submission as submission_module
 from yukitools_rime.api.types import SolutionRequest, StatusInfo, SubmissionInfo
 from yukitools_rime.commands.submission import (
+    SubmissionRecordError,
     SubmissionResponseError,
     manage_expected_solution,
     parse_submission_id,
     submit_solution,
     wait_for_submission,
 )
-from yukitools_rime.errors import FileOperationError, LayoutError, ValidationError
+from yukitools_rime.errors import ConfigError, FileOperationError, LayoutError, ValidationError
 from yukitools_rime.layout import (
     ProblemLayout,
     ProjectLayout,
@@ -25,6 +27,7 @@ from yukitools_rime.models import (
     ProjectConfig,
     SolutionConfig,
 )
+from yukitools_rime.rime_config import parse_solution_config, render_solution_block
 
 
 class FakeSubmission:
@@ -74,6 +77,9 @@ def selection(
     solution_config = config if config is not None else SolutionConfig("py", "main.py", "script")
     if isinstance(solution_config, SolutionConfig):
         (solution_path / solution_config.src).write_bytes(source)
+        (solution_path / "SOLUTION").write_bytes(
+            render_solution_block(solution_config).encode("utf-8")
+        )
     solution = SolutionLayout(solution_path, solution_config)
     settings = ProblemSettings("title", "", 1, 1000, 256, "-", "0", False, False, 0, 0)
     problem = ProblemLayout(
@@ -135,6 +141,107 @@ def test_submit_uses_managed_solution_owner_config_and_normalized_source(
     assert result.lang_id == "py"
     assert fake.submits == [(42, "py", "print(1)\n")]
     assert created == [owner]
+    assert not result.already_submitted
+    assert selected.solution is not None
+    stored = parse_solution_config((selected.solution.path / "SOLUTION").read_text())
+    assert stored.submission_id == 77
+
+
+def test_submit_reloads_recorded_id_when_selection_is_reused(tmp_path: Path) -> None:
+    selected, _ = selection(tmp_path)
+    fake = FakeSubmission("77")
+
+    first = submit_solution(selected, fake)
+    second = submit_solution(selected, fake)
+
+    assert not first.already_submitted
+    assert second.already_submitted
+    assert second.submission_id == 77
+    assert fake.submits == [(42, "py", "print(1)\n")]
+
+
+def test_submit_skips_recorded_solution_without_source_or_client(tmp_path: Path) -> None:
+    selected, _ = selection(
+        tmp_path,
+        config=SolutionConfig("py", "main.py", "script", submission_id=55),
+    )
+    assert selected.solution is not None
+    (selected.solution.path / "main.py").unlink()
+    created = False
+    reported: list[tuple[int, int]] = []
+
+    def forbidden_factory(_problem: ProblemLayout) -> FakeSubmission:
+        nonlocal created
+        created = True
+        raise AssertionError("client must not be created")
+
+    result = submit_solution(
+        selected,
+        forbidden_factory,
+        on_submitted=lambda problem_id, submission_id: reported.append((problem_id, submission_id)),
+    )
+
+    assert result.already_submitted
+    assert result.submission_id == 55
+    assert result.raw_response == ""
+    assert not created
+    assert reported == []
+
+
+def test_force_submit_overwrites_recorded_id(tmp_path: Path) -> None:
+    selected, _ = selection(
+        tmp_path,
+        config=SolutionConfig("py", "main.py", "script", submission_id=55),
+    )
+    fake = FakeSubmission("77")
+
+    result = submit_solution(selected, fake, force=True)
+
+    assert not result.already_submitted
+    assert fake.submits == [(42, "py", "print(1)\n")]
+    assert selected.solution is not None
+    stored = parse_solution_config((selected.solution.path / "SOLUTION").read_text())
+    assert stored.submission_id == 77
+
+
+def test_force_submit_with_unknown_response_keeps_recorded_id(tmp_path: Path) -> None:
+    selected, _ = selection(
+        tmp_path,
+        config=SolutionConfig("py", "main.py", "script", submission_id=55),
+    )
+    fake = FakeSubmission('{"accepted":true}')
+
+    result = submit_solution(selected, fake, force=True)
+
+    assert result.submission_id is None
+    assert selected.solution is not None
+    stored = parse_solution_config((selected.solution.path / "SOLUTION").read_text())
+    assert stored.submission_id == 55
+
+
+def test_submission_record_reloads_concurrent_solution_edits(tmp_path: Path) -> None:
+    selected, _ = selection(tmp_path)
+    fake = FakeSubmission("77")
+    assert selected.solution is not None
+    config_path = selected.solution.path / "SOLUTION"
+
+    def edit_during_submit(problem_id: int, lang: str, source: str) -> str:
+        fake.submits.append((problem_id, lang, source))
+        edited = SolutionConfig(
+            "py",
+            "main.py",
+            "script",
+            rime_options={"edited": True},
+        )
+        config_path.write_bytes(render_solution_block(edited).encode("utf-8"))
+        return "77"
+
+    fake.submit = edit_during_submit  # type: ignore[method-assign]
+    submit_solution(selected, fake)
+
+    stored = parse_solution_config(config_path.read_text())
+    assert stored.rime_options == {"edited": True}
+    assert stored.submission_id == 77
 
 
 class FakeClock:
@@ -186,6 +293,12 @@ def test_submit_callback_preserves_id_before_polling_failure(tmp_path: Path) -> 
     fake = FakeSubmission('{"submissionId": 77}')
     reported: list[tuple[int, int]] = []
 
+    def report_submitted(problem_id: int, submission_id: int) -> None:
+        assert selected.solution is not None
+        stored = parse_solution_config((selected.solution.path / "SOLUTION").read_text())
+        assert stored.submission_id == 77
+        reported.append((problem_id, submission_id))
+
     def fail_statuses() -> list[StatusInfo]:
         assert reported == [(42, 77)]
         raise RuntimeError("status endpoint failed")
@@ -197,13 +310,64 @@ def test_submit_callback_preserves_id_before_polling_failure(tmp_path: Path) -> 
             selected,
             fake,
             wait=True,
+            on_submitted=report_submitted,
+        )
+
+    assert reported == [(42, 77)]
+    assert fake.submits == [(42, "py", "print(1)\n")]
+    assert selected.solution is not None
+    stored = parse_solution_config((selected.solution.path / "SOLUTION").read_text())
+    assert stored.submission_id == 77
+
+
+def test_submission_record_failure_reports_remote_id_and_skips_polling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected, _ = selection(
+        tmp_path,
+        config=SolutionConfig("py", "main.py", "script", submission_id=55),
+    )
+    fake = FakeSubmission("77")
+    assert selected.solution is not None
+    config_path = selected.solution.path / "SOLUTION"
+    before = config_path.read_bytes()
+    reported: list[tuple[int, int]] = []
+
+    def fail_write(_path: Path, _source: str) -> None:
+        raise ConfigError("disk full")
+
+    monkeypatch.setattr(submission_module, "write_config_atomic", fail_write)
+
+    with pytest.raises(SubmissionRecordError, match=r"submission 77 .*disk full"):
+        submit_solution(
+            selected,
+            fake,
+            force=True,
+            wait=True,
             on_submitted=lambda problem_id, submission_id: reported.append(
                 (problem_id, submission_id)
             ),
         )
 
-    assert reported == [(42, 77)]
     assert fake.submits == [(42, "py", "print(1)\n")]
+    assert fake.status_calls == 0
+    assert reported == []
+    assert config_path.read_bytes() == before
+
+
+def test_submit_rejects_non_boolean_force_before_source_or_client(
+    tmp_path: Path,
+) -> None:
+    selected, _ = selection(tmp_path)
+    assert selected.solution is not None
+    (selected.solution.path / "main.py").unlink()
+    fake = FakeSubmission()
+
+    with pytest.raises(ValidationError, match="force"):
+        submit_solution(selected, fake, force=1)  # type: ignore[arg-type]
+
+    assert fake.submits == []
 
 
 def test_wait_for_submission_times_out_at_deadline() -> None:

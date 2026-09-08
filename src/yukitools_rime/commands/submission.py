@@ -16,10 +16,16 @@ from yukitools_rime.api.types import (
     SubmissionInfo,
     judging_ids,
 )
-from yukitools_rime.errors import LayoutError, ValidationError
+from yukitools_rime.errors import ConfigError, LayoutError, ValidationError
 from yukitools_rime.files import read_text, require_regular_file
-from yukitools_rime.layout import ProblemLayout, TargetSelection
+from yukitools_rime.layout import ProblemLayout, SolutionLayout, TargetSelection
 from yukitools_rime.models import SolutionConfig
+from yukitools_rime.rime_config import (
+    parse_solution_config,
+    read_config_source,
+    update_solution_submission_id,
+    write_config_atomic,
+)
 
 
 class SubmissionAPI(Protocol):
@@ -47,6 +53,7 @@ class SubmissionResult:
     judge_status: str | None = None
     run_time_ms: int | None = None
     wait_timed_out: bool = False
+    already_submitted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +67,10 @@ class ExpectedSolutionResult:
 
 class SubmissionResponseError(ValidationError):
     """The submit endpoint returned no unambiguous positive submission id."""
+
+
+class SubmissionRecordError(ConfigError):
+    """A remote submission succeeded but its id could not be saved locally."""
 
 
 JUDGE_TIMEOUT_SECONDS = 600.0
@@ -84,6 +95,20 @@ def _client(
     if hasattr(source, "submit") and hasattr(source, "set_solution"):
         return cast(SubmissionAPI, source)
     return source(problem)
+
+
+def _record_submission_id(solution: SolutionLayout, submission_id: int) -> None:
+    config_path = solution.config_path
+    try:
+        source = read_config_source(config_path)
+        updated = update_solution_submission_id(source, submission_id)
+        if updated != source:
+            write_config_atomic(config_path, updated)
+    except ConfigError as exc:
+        raise SubmissionRecordError(
+            f"submission {submission_id} was accepted, but its id could not be "
+            f"recorded in {config_path}: {exc}"
+        ) from exc
 
 
 def _positive_id(value: object) -> int:
@@ -171,6 +196,7 @@ def submit_solution(
     client: SubmissionAPI | SubmissionClientFactory,
     *,
     wait: bool = False,
+    force: bool = False,
     on_submitted: SubmittedCallback | None = None,
     timeout: float = JUDGE_TIMEOUT_SECONDS,
     interval: float = JUDGE_POLL_INTERVAL_SECONDS,
@@ -185,9 +211,22 @@ def submit_solution(
         raise LayoutError("target must be inside a managed SOLUTION directory")
     if not isinstance(solution.config, SolutionConfig):
         raise LayoutError(f"{solution.config_path}: not a yukicoder solution")
+    if not isinstance(force, bool):
+        raise ValidationError("force must be true or false")
+    solution_config = parse_solution_config(read_config_source(solution.config_path))
+    if solution_config.submission_id is not None and not force:
+        return SubmissionResult(
+            problem_id=problem.problem_id,
+            submission_id=solution_config.submission_id,
+            solution_path=solution.path,
+            source_path=solution.path / solution_config.src,
+            lang_id=solution_config.lang_id,
+            raw_response="",
+            already_submitted=True,
+        )
     source_path = require_regular_file(
         solution.path,
-        solution.config.src,
+        solution_config.src,
         label="solution source",
     )
     source = read_text(source_path)
@@ -196,15 +235,17 @@ def submit_solution(
     api = _client(client, problem)
     raw_response = api.submit(
         problem.problem_id,
-        solution.config.lang_id,
+        solution_config.lang_id,
         source,
     )
     try:
         submission_id = parse_submission_id(raw_response)
     except SubmissionResponseError:
         submission_id = None
-    if submission_id is not None and on_submitted is not None:
-        on_submitted(problem.problem_id, submission_id)
+    if submission_id is not None:
+        _record_submission_id(solution, submission_id)
+        if on_submitted is not None:
+            on_submitted(problem.problem_id, submission_id)
     submission: SubmissionInfo | None = None
     wait_timed_out = False
     if wait and submission_id is not None:
@@ -222,7 +263,7 @@ def submit_solution(
         submission_id=submission_id,
         solution_path=solution.path,
         source_path=source_path,
-        lang_id=solution.config.lang_id,
+        lang_id=solution_config.lang_id,
         raw_response=raw_response,
         judge_status=None if submission is None else submission.status,
         run_time_ms=None if submission is None else submission.run_time_ms,
@@ -274,6 +315,7 @@ __all__ = [
     "ExpectedSolutionResult",
     "SubmissionAPI",
     "SubmissionClientFactory",
+    "SubmissionRecordError",
     "SubmissionResponseError",
     "SubmissionResult",
     "SubmittedCallback",
