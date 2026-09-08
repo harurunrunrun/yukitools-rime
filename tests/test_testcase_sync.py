@@ -559,6 +559,25 @@ def test_push_uses_detail_hashes_and_downloads_only_server_adjustments(
     assert (target / "sample.diff").read_bytes() == b"same-out"
 
 
+def test_push_accepts_zero_byte_input_and_reuses_empty_remote_hash(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "cases"
+    write_case(target, case("sample", b"", b"output"))
+    api = DetailedAPI({"sample": b"old-input"}, {"sample": b"output"})
+
+    result = push_testcases(api, 42, target)
+
+    assert result.uploaded_inputs == 1
+    assert result.uploaded_outputs == 0
+    assert api.uploads == [("in", ("sample",))]
+    assert api.data["in"]["sample"] == b""
+    assert api.gets == []
+    assert result.remote_snapshot["sample"] == case("sample", b"", b"output")
+    assert (target / "sample.in").read_bytes() == b""
+    assert (target / "sample.diff").read_bytes() == b"output"
+
+
 def test_push_accepts_zero_byte_output_and_refreshes_server_normalization(
     tmp_path: Path,
 ) -> None:

@@ -290,14 +290,18 @@ def test_inspect_rejects_case_insensitive_name_collision(tmp_path: Path) -> None
         inspect_testcases(cases)
 
 
-def test_read_testcases_rejects_empty_input(tmp_path: Path) -> None:
+def test_inspect_and_read_testcases_accept_zero_byte_input(tmp_path: Path) -> None:
     cases = tmp_path / "cases"
     cases.mkdir()
     (cases / "sample.in").write_bytes(b"")
     (cases / "sample.diff").write_bytes(b"output")
 
-    with pytest.raises(LayoutError, match="empty input"):
-        read_testcases(cases)
+    inspected, missing_outputs, missing_inputs = inspect_testcases(cases)
+
+    assert inspected == {"sample": CaseData("sample", b"", b"output")}
+    assert missing_outputs == ()
+    assert missing_inputs == ()
+    assert read_testcases(cases) == inspected
 
 
 def test_inspect_and_read_testcases_accept_zero_byte_output(tmp_path: Path) -> None:

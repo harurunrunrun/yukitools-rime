@@ -392,28 +392,44 @@ def test_testcase_accept_replaces_exact_snapshot(tmp_path: Path) -> None:
     assert result.problems[0].testcases_applied
 
 
-def test_pull_and_diff_preserve_zero_byte_testcase_output(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("remote_cases", "changed_cases", "empty_side"),
+    [
+        (
+            {("in", "sample"): b"", ("out", "sample"): b"output"},
+            {("in", "sample"): b"now non-empty", ("out", "sample"): b"output"},
+            "input",
+        ),
+        (
+            {("in", "sample"): b"input", ("out", "sample"): b""},
+            {("in", "sample"): b"input", ("out", "sample"): b"now non-empty"},
+            "output",
+        ),
+    ],
+)
+def test_pull_and_diff_preserve_zero_byte_testcase_side(
+    tmp_path: Path,
+    remote_cases: dict[tuple[str, str], bytes],
+    changed_cases: dict[tuple[str, str], bytes],
+    empty_side: str,
+) -> None:
     project = make_project(tmp_path)
     problem = project.problems[0]
-    empty_output = {
-        ("in", "sample"): b"input",
-        ("out", "sample"): b"",
-    }
 
     pulled = sync.pull(
         project,
-        factory(client(cases=empty_output)),
+        factory(client(cases=remote_cases)),
         include_testcases=True,
     )
 
     directory = problem.path / "generated" / "tests"
     assert pulled.problems[0].testcases_applied
-    assert read_testcases(directory)["sample"].output == b""
+    assert getattr(read_testcases(directory)["sample"], empty_side) == b""
     before_diff = file_snapshot(tmp_path)
 
     equal = sync.diff_remote(
         load_project(tmp_path),
-        factory(client(cases=empty_output)),
+        factory(client(cases=remote_cases)),
         include_testcases=True,
     )
     assert not any(entry.resource == "testcase sample" for entry in equal.problems[0].entries)
@@ -421,7 +437,7 @@ def test_pull_and_diff_preserve_zero_byte_testcase_output(tmp_path: Path) -> Non
 
     changed = sync.diff_remote(
         load_project(tmp_path),
-        factory(client(cases={("in", "sample"): b"input", ("out", "sample"): b"now non-empty"})),
+        factory(client(cases=changed_cases)),
         include_testcases=True,
     )
     assert any(

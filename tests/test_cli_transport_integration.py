@@ -590,6 +590,40 @@ def make_testcase_project(root: Path) -> tuple[Path, Path]:
     return problem, cases
 
 
+def test_cli_push_uploads_zero_byte_input_through_multipart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    problem, cases = make_testcase_project(tmp_path / "project")
+    (cases / "sample.in").write_bytes(b"")
+    remote = _TestcaseRemote(statement="local statement\n")
+    clients = install_authenticated_transport(
+        monkeypatch,
+        httpx.MockTransport(remote),
+    )
+    monkeypatch.setenv("YUKICODER_TOKEN_42", TOKEN)
+    monkeypatch.setattr(cli, "push", partial(cli.push, testcase_refresh_delay=0.0))
+
+    code, stdout, stderr = invoke(["push", str(problem), "--testcases"])
+
+    assert code == 0
+    assert stderr == ""
+    assert "完了: problem 42 testcase inputs [sample]" in stdout
+    assert "完了: problem 42 testcase outputs [sample]" in stdout
+    assert remote.file_attempts == [
+        ("upload", "in", ("sample",)),
+        ("upload", "out", ("sample",)),
+    ]
+    assert remote.cases == {
+        ("in", "sample"): b"",
+        ("out", "sample"): b"output",
+    }
+    assert (cases / "sample.in").read_bytes() == b""
+    assert (cases / "sample.diff").read_bytes() == b"output"
+    assert len(clients) == 1
+    assert clients[0]._http.is_closed
+
+
 def test_cli_push_repairs_only_output_after_partial_http_upload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

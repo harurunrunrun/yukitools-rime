@@ -174,18 +174,19 @@ def test_snapshot_comparison_partitions_all_names(
 
 
 @settings(max_examples=100, deadline=None)
-@example(b"")
-@given(st.binary(max_size=64))
-def test_nonempty_input_and_arbitrary_output_round_trip(output_data: bytes) -> None:
+@example(b"", b"")
+@example(b"", b"output")
+@given(st.binary(max_size=64), st.binary(max_size=64))
+def test_arbitrary_input_and_output_round_trip(input_data: bytes, output_data: bytes) -> None:
     with TemporaryDirectory() as temporary:
         directory = Path(temporary)
-        (directory / "sample.in").write_bytes(b"input")
+        (directory / "sample.in").write_bytes(input_data)
         (directory / "sample.diff").write_bytes(output_data)
 
         snapshot = read_testcases(directory)
 
     assert snapshot == {
-        "sample": CaseData("sample", b"input", output_data),
+        "sample": CaseData("sample", input_data, output_data),
     }
 
 

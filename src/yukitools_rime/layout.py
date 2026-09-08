@@ -369,10 +369,6 @@ def read_testcases(
         raise LayoutError(f"incomplete testcase pairs in {root}: {'; '.join(details)}")
     if require_nonempty and not result:
         raise LayoutError(f"no testcase pairs found in {root}")
-    if require_nonempty:
-        for name, case in result.items():
-            if not case.input:
-                raise LayoutError(f"testcase {name!r} has an empty input")
     return result
 
 
