@@ -306,7 +306,7 @@ def _integration_project(root: Path) -> tuple[ProjectLayout, dict[str, str]]:
         render_problem_block(ProblemConfig(1, _settings(), "A")),
         encoding="utf-8",
     )
-    (problem / "statement.md").write_text("statement\n", encoding="utf-8")
+    (problem / "statement.md").write_bytes(b"statement\n")
     testset = problem / "tests"
     testset.mkdir()
     options = {"dependency": ["testlib.h", "shared.hpp", "nested.hpp"]}
