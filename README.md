@@ -150,7 +150,7 @@ rime-out/ 以下の生成済みテストケースは一切 Git で管理しま�
 | yukitools-rime pull [TARGET] [--testcases] [--yes] | remote を local へ反映 |
 | yukitools-rime diff [TARGET] [--testcases] [--exit-code] | remote→local の差分表示 |
 | yukitools-rime push [TARGET] [--testcases] [--dry-run] [--prune] [--generate] [--no-wait-compile] | local を remote へ反映 |
-| yukitools-rime submit [SOLUTION] [--no-wait] | Rime の解答を提出して判定を待つ |
+| yukitools-rime submit [SOLUTION] [--no-wait] [--force] | Rime の解答を提出して判定を待つ |
 | yukitools-rime solution <提出ID> [TARGET] (--summary TEXT または --delete) | 想定解を登録・解除 |
 | yukitools-rime testcases [TARGET] [--which in または out] | remote のケース名を表示 |
 | yukitools-rime languages [--include-disabled] | 言語 ID を表示 |
@@ -184,8 +184,13 @@ CI が Rime を実行してください。remote 更新は非トランザクシ�
 
 submit は所属問題、ソース、yukicoder の lang_id を yukicoder_solution() から
 取得し、既定では最大 10 分、5 秒間隔でジャッジ結果を待って status と実行時間を表示します。
---no-wait を指定すると提出 ID の表示後に待たず終了します。solution は既存提出を
-想定解として登録または解除します。testcases は
+提出が受理されて正の提出 ID を取得すると、判定待ちより先に SOLUTION の
+submission_id へ保存します。submission_id が既にある場合、通常の submit は再提出せず、
+保存済み ID と URL を表示して終了します。再提出するには --force を指定してください。
+新しい ID を取得できた場合だけ保存済み ID を上書きするため、応答から ID を判別できない
+場合は以前の値を保持します。--no-wait を指定した場合も、提出 ID を保存してから待たずに
+終了します。再提出防止を手動で解除する場合は submission_id=None に戻します。solution は
+既存提出を想定解として登録または解除します。testcases は
 本文を取らず remote の名前だけを表示します。languages は匿名 API を使うため、
 プロジェクト外でも実行できます。
 
@@ -322,6 +327,7 @@ yukicoder_solution(
     rime_kind="cxx",
     challenge_cases=[],
     rime_options={},
+    submission_id=None,
 )
 ~~~
 
