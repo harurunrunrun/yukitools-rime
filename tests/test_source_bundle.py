@@ -317,12 +317,12 @@ def _integration_project(root: Path) -> tuple[ProjectLayout, dict[str, str]]:
     )
     (testset / "TESTSET").write_text(render_testset_block(configs), encoding="utf-8")
     for name in ("generator", "judge", "validator"):
-        (testset / f"{name}.cpp").write_text(
+        source = (
             '#include "testlib.h"\n'
             '#include "shared.hpp"\n'
-            f"int {name}() {{ return SHARED + TESTLIB; }}\n",
-            encoding="utf-8",
+            f"int {name}() {{ return SHARED + TESTLIB; }}\n"
         )
+        (testset / f"{name}.cpp").write_bytes(source.encode("utf-8"))
     layout = load_project(root)
     loaded_testset = layout.problems[0].testset
     assert loaded_testset is not None
