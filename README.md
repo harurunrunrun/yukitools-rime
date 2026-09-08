@@ -330,6 +330,41 @@ lang_id は yukicoder の ID、rime_kind は c、cxx、java、kotlin、rust、go
 generator、validator、judge、solution の同期だけできます。rime_options は
 Rime/Rime Plus の directive へ渡されます。
 
+### Rime Plus の common 依存ファイル
+
+C/C++ の generator、validator、judge が Rime Plus の common ファイルを使う場合は、
+PROJECT に literal な library_dir を設定し、TESTSET 側の rime_options へ
+dependency を列挙します。
+
+~~~python
+# PROJECT
+use_plugin("plus")
+project(library_dir="common")
+~~~
+
+~~~python
+# TESTSET の例
+yukicoder_generator(
+    lang_id="cpp20",
+    src="generator.cpp",
+    test_case_num=10,
+    rime_kind="cxx",
+    rime_options={"dependency": ["testlib.h", "params.h"]},
+)
+~~~
+
+push と diff は `#include "..."` で直接参照された dependency を再帰的に展開し、
+testlib.h を含む単一の送信用ソースを作ります。ローカルのソースや common ファイル
+自体は変更しません。include guard、トップレベルの `#pragma once`、同じファイルを
+複数回読む X-macro の意味も保ちます。pull では remote が展開結果と同じなら
+モジュール分割を保持し、異なる場合は common 構成を展開済みソースで潰さず
+競合エラーにします。
+
+dependency は library_dir 直下にある UTF-8 の通常ファイル名だけを指定できます。
+展開対象は C/C++ の1行の quoted include に限定されます。unguarded な循環 include
+や C/C++ 以外での dependency は設定エラーになり、macro／行継続で組み立てた
+include は展開されません。
+
 CLI は設定を実行せず AST で読みます。専用呼び出しにはリテラル引数だけを使い、
 動的式、未知引数、重複呼び出しは設定エラーになります。ツールは BEGIN/END 内だけ
 を編集し、外側の内容と改行形式を保持します。ソースは宣言と同じディレクトリの
@@ -338,8 +373,9 @@ CLI は設定を実行せず AST で読みます。専用呼び出しにはリ�
 ## テストケースの同期
 
 同期先は <problem>/<rime_out_dir>/<testset-name>/ の直下です。remote の foo.txt は
-local の foo.txt.in と foo.txt.diff に対応します。stem は完全に一致し、両方が
-非空の通常ファイルでなければなりません。名前に使える文字はサーバーの
+local の foo.txt.in と foo.txt.diff に対応します。stem は完全に一致し、入力は
+非空の通常ファイル、出力は通常ファイル（0 byte 可）でなければなりません。名前に
+使える文字はサーバーの
 `GET /v1/testcase_name_rule` を取得して検証します。現在の規則では ASCII 英数字、
 ピリオド、アンダースコア、ハイフンを使用できます。サーバーが許可していても、
 空名、.、..、先頭ピリオド、パス区切り、Windows予約名、末尾のピリオドや空白など、
