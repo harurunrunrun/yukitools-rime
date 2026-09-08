@@ -383,8 +383,8 @@ CLI は設定を実行せず AST で読みます。専用呼び出しにはリ�
 ## テストケースの同期
 
 同期先は <problem>/<rime_out_dir>/<testset-name>/ の直下です。remote の foo.txt は
-local の foo.txt.in と foo.txt.diff に対応します。stem は完全に一致し、入力は
-非空の通常ファイル、出力は通常ファイル（0 byte 可）でなければなりません。名前に
+local の foo.txt.in と foo.txt.diff に対応します。stem は完全に一致し、入力と
+出力はいずれも通常ファイル（0 byte 可）でなければなりません。名前に
 使える文字はサーバーの
 `GET /v1/testcase_name_rule` を取得して検証します。現在の規則では ASCII 英数字、
 ピリオド、アンダースコア、ハイフンを使用できます。サーバーが許可していても、
