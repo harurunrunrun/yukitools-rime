@@ -439,6 +439,7 @@ class SolutionConfig:
     rime_kind: str | None = None
     challenge_cases: tuple[str, ...] | list[str] = ()
     rime_options: dict[str, object] = field(default_factory=dict)
+    submission_id: int | None = None
 
     def __post_init__(self) -> None:
         self.lang_id = _string(self.lang_id, label="lang_id", empty=False)
@@ -455,6 +456,12 @@ class SolutionConfig:
         self.rime_options = cast(
             dict[str, object], _literal_mapping(self.rime_options, label="rime_options")
         )
+        if self.submission_id is not None and (
+            isinstance(self.submission_id, bool)
+            or not isinstance(self.submission_id, int)
+            or self.submission_id < 1
+        ):
+            raise ValidationError("submission_id must be a positive integer or None")
 
 
 @dataclass(slots=True)

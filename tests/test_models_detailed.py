@@ -285,6 +285,10 @@ def test_settings_remote_rejects_non_mapping() -> None:
         lambda: SolutionConfig("cpp", "SOLUTION"),
         lambda: SolutionConfig("cpp", "main.cpp", challenge_cases="sample"),  # type: ignore[arg-type]
         lambda: SolutionConfig("cpp", "main.cpp", challenge_cases=["bad name"]),
+        lambda: SolutionConfig("cpp", "main.cpp", submission_id=True),
+        lambda: SolutionConfig("cpp", "main.cpp", submission_id=0),
+        lambda: SolutionConfig("cpp", "main.cpp", submission_id=-1),
+        lambda: SolutionConfig("cpp", "main.cpp", submission_id="1"),  # type: ignore[arg-type]
     ],
 )
 def test_problem_tool_models_reject_invalid_configuration(factory: object) -> None:

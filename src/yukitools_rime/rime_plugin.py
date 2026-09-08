@@ -146,6 +146,7 @@ def yukicoder_solution(
     rime_kind: str | None = None,
     challenge_cases: list[str] | tuple[str, ...] = (),
     rime_options: dict[str, object] | None = None,
+    submission_id: int | None = None,
 ) -> None:
     _invoke(
         "yukicoder_solution",
@@ -154,6 +155,7 @@ def yukicoder_solution(
         rime_kind=rime_kind,
         challenge_cases=challenge_cases,
         rime_options={} if rime_options is None else rime_options,
+        submission_id=submission_id,
     )
 
 

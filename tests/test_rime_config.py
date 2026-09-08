@@ -27,6 +27,7 @@ from yukitools_rime.rime_config import (
     render_project_block,
     render_solution_block,
     render_testset_block,
+    update_solution_submission_id,
     upsert_managed_block,
     upsert_managed_block_at_end,
     write_config_atomic,
@@ -55,8 +56,28 @@ def test_all_config_types_round_trip() -> None:
         ValidatorConfig("cpp20", "validator.cpp", "cxx", {"flags": ["-Wall"]}),
     )
     assert parse_testset_config(render_testset_block(testset)) == testset
-    solution = SolutionConfig("cpp20", "main.cpp", "cxx", ["sample01"], {"flags": ["-O2"]})
+    solution = SolutionConfig("cpp20", "main.cpp", "cxx", ["sample01"], {"flags": ["-O2"]}, 123)
     assert parse_solution_config(render_solution_block(solution)) == solution
+
+
+def test_update_solution_submission_id_preserves_local_config_and_format() -> None:
+    original = SolutionConfig(
+        "cpp20",
+        "main.cpp",
+        "cxx",
+        ["sample01"],
+        {"flags": ["-O2"]},
+    )
+    source = "\ufeff# local setting\r\n\r\n" + render_solution_block(original).replace("\n", "\r\n")
+
+    updated = update_solution_submission_id(source, 987)
+
+    assert updated.startswith("\ufeff# local setting\r\n\r\n")
+    assert "\n" not in updated.replace("\r\n", "")
+    assert parse_solution_config(updated) == SolutionConfig(
+        "cpp20", "main.cpp", "cxx", ["sample01"], {"flags": ["-O2"]}, 987
+    )
+    assert update_solution_submission_id(updated, 987) == updated
 
 
 @pytest.mark.parametrize(

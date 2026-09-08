@@ -179,8 +179,10 @@ def test_program_wrappers_delegate_by_rime_kind(monkeypatch: pytest.MonkeyPatch)
         src="main.cpp",
         rime_kind="cxx",
         challenge_cases=[],
+        submission_id=321,
     )
     assert solution.calls == [("cxx_solution", ("main.cpp",), {"challenge_cases": None})]
+    assert solution.yukicoder_config.submission_id == 321
 
 
 def test_normal_judge_source_is_sync_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -547,6 +549,7 @@ def test_public_dsl_wrappers_forward_defaults_to_active_handlers() -> None:
     assert captured["yukicoder_judge"]["rime_options"] == {}
     assert captured["yukicoder_solution"]["challenge_cases"] == ()
     assert captured["yukicoder_solution"]["rime_options"] == {}
+    assert captured["yukicoder_solution"]["submission_id"] is None
 
 
 def test_is_within_handles_incompatible_path_roots(

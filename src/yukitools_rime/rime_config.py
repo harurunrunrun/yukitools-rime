@@ -12,7 +12,7 @@ import io
 import pprint
 import tokenize
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TypeVar
 
@@ -70,6 +70,7 @@ _SOLUTION_KEYS = (
     "rime_kind",
     "challenge_cases",
     "rime_options",
+    "submission_id",
 )
 
 
@@ -502,6 +503,7 @@ def render_solution_block(config: SolutionConfig) -> str:
                 ("rime_kind", config.rime_kind),
                 ("challenge_cases", list(config.challenge_cases)),
                 ("rime_options", config.rime_options),
+                ("submission_id", config.submission_id),
             ],
         )
     )
@@ -583,6 +585,14 @@ def update_problem_block(source: str, remote: ProblemConfig) -> str:
     local = parse_problem_config(source)
     merged = merge_remote_problem(local, remote)
     return upsert_managed_block(source, render_problem_block(merged))
+
+
+def update_solution_submission_id(source: str, submission_id: int) -> str:
+    """Set only the local submission id in a managed SOLUTION block."""
+
+    current = parse_solution_config(source)
+    updated = replace(current, submission_id=submission_id)
+    return upsert_managed_block(source, render_solution_block(updated))
 
 
 _T = TypeVar("_T")
