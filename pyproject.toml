@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yukitools-rime"
-version = "0.1.2"
+version = "0.1.3"
 description = "Manage yukicoder problems from a Rime project"
 readme = "README.md"
 requires-python = ">=3.11"

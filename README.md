@@ -22,7 +22,7 @@ python3 --version  # 3.11 以上であることを確認
 python3 -m venv ~/.venvs/yukitools-rime
 . ~/.venvs/yukitools-rime/bin/activate
 python -m pip install --upgrade pip
-VERSION=0.1.2
+VERSION=0.1.3
 python -m pip install "https://github.com/harurunrunrun/yukitools-rime/releases/download/v${VERSION}/yukitools_rime-${VERSION}-py3-none-any.whl"
 yukitools-rime --version
 yukitools-rime --help
@@ -45,7 +45,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip build
 python -m build
-python -m pip install --force-reinstall dist/yukitools_rime-0.1.2-py3-none-any.whl
+python -m pip install --force-reinstall dist/yukitools_rime-0.1.3-py3-none-any.whl
 yukitools-rime --version
 yukitools-rime --help
 ~~~
@@ -73,7 +73,7 @@ Release版は新しいRelease番号を `VERSION` へ指定して更新します�
 
 ~~~console
 . ~/.venvs/yukitools-rime/bin/activate
-VERSION=0.1.2
+VERSION=0.1.3
 python -m pip install --upgrade "https://github.com/harurunrunrun/yukitools-rime/releases/download/v${VERSION}/yukitools_rime-${VERSION}-py3-none-any.whl"
 yukitools-rime --version
 ~~~
@@ -86,7 +86,7 @@ clone版はcloneしたディレクトリへ移動し、次のように更新し�
 . .venv/bin/activate
 git pull --ff-only
 python -m build
-python -m pip install --upgrade --force-reinstall dist/yukitools_rime-0.1.2-py3-none-any.whl
+python -m pip install --upgrade --force-reinstall dist/yukitools_rime-0.1.3-py3-none-any.whl
 yukitools-rime --version
 ~~~
 
