@@ -110,6 +110,7 @@ def test_reference_rime_loads_all_managed_configurations(tmp_path: Path) -> None
                 lang_id="python3",
                 src="main.py",
                 rime_kind="script",
+                submission_id=12345,
             )
         ),
         encoding="utf-8",
