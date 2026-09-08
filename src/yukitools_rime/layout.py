@@ -373,8 +373,6 @@ def read_testcases(
         for name, case in result.items():
             if not case.input:
                 raise LayoutError(f"testcase {name!r} has an empty input")
-            if not case.output:
-                raise LayoutError(f"testcase {name!r} has an empty output")
     return result
 
 

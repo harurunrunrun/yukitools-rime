@@ -57,6 +57,21 @@ def test_multipart_has_exact_file_and_text_part_shape() -> None:
     assert body.endswith(b"--fixed--\r\n")
 
 
+def test_multipart_preserves_zero_byte_file_content() -> None:
+    boundary, body = multipart(
+        [Part.file("newfiles", "empty.txt", b"")],
+        boundary="fixed",
+    )
+
+    assert boundary == "fixed"
+    assert body == (
+        b"--fixed\r\n"
+        b'Content-Disposition: form-data; name="newfiles"; filename="empty.txt"\r\n'
+        b"Content-Type: text/plain\r\n\r\n"
+        b"\r\n--fixed--\r\n"
+    )
+
+
 @pytest.mark.parametrize(
     "name",
     ["", ".", "..", ".hidden", "../evil", "a/b", "case 1.txt", "日本語.txt"],

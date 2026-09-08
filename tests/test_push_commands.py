@@ -440,6 +440,37 @@ def test_testcases_upload_prune_and_refresh_server_normalization(
     assert sleeps == [1.25]
 
 
+def test_push_uploads_and_refreshes_zero_byte_testcase_output(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    problem = project.problems[0]
+    directory = write_case(problem, "sample", b"input", b"")
+    client = FakeClient(
+        cases={
+            ("in", "sample"): b"input",
+            ("out", "sample"): b"old-output",
+        }
+    )
+
+    result = push(
+        project,
+        factory({1: client}),
+        include_testcases=True,
+        testcase_refresh_delay=0,
+    )
+
+    assert "upload-in-sample" not in client.calls
+    assert "upload-out-sample" in client.calls
+    assert client.cases[("in", "sample")] == b"input"
+    assert client.cases[("out", "sample")] == b""
+    refreshed = read_testcases(directory)["sample"]
+    assert refreshed.input == b"input"
+    assert refreshed.output == b""
+    assert result.completed_items == (
+        "problem 1 testcase outputs [sample]",
+        "problem 1 testcase normalization refresh",
+    )
+
+
 def test_normalization_refresh_does_not_import_remote_only_cases_without_prune(
     tmp_path: Path,
 ) -> None:

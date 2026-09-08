@@ -392,6 +392,45 @@ def test_testcase_accept_replaces_exact_snapshot(tmp_path: Path) -> None:
     assert result.problems[0].testcases_applied
 
 
+def test_pull_and_diff_preserve_zero_byte_testcase_output(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    problem = project.problems[0]
+    empty_output = {
+        ("in", "sample"): b"input",
+        ("out", "sample"): b"",
+    }
+
+    pulled = sync.pull(
+        project,
+        factory(client(cases=empty_output)),
+        include_testcases=True,
+    )
+
+    directory = problem.path / "generated" / "tests"
+    assert pulled.problems[0].testcases_applied
+    assert read_testcases(directory)["sample"].output == b""
+    before_diff = file_snapshot(tmp_path)
+
+    equal = sync.diff_remote(
+        load_project(tmp_path),
+        factory(client(cases=empty_output)),
+        include_testcases=True,
+    )
+    assert not any(entry.resource == "testcase sample" for entry in equal.problems[0].entries)
+    assert file_snapshot(tmp_path) == before_diff
+
+    changed = sync.diff_remote(
+        load_project(tmp_path),
+        factory(client(cases={("in", "sample"): b"input", ("out", "sample"): b"now non-empty"})),
+        include_testcases=True,
+    )
+    assert any(
+        entry.resource == "testcase sample" and entry.detail == "raw bytes differ"
+        for entry in changed.problems[0].entries
+    )
+    assert file_snapshot(tmp_path) == before_diff
+
+
 def test_project_pull_with_testcases_keeps_all_staged_snapshots_available(
     tmp_path: Path,
 ) -> None:

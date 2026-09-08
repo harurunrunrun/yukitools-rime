@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import re
-from pathlib import PurePath
+from pathlib import Path, PurePath
+from tempfile import TemporaryDirectory
 
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from yukitools_rime.errors import ValidationError
 from yukitools_rime.files import normalize_text
 from yukitools_rime.layout import TestCaseData as CaseData
+from yukitools_rime.layout import read_testcases
 from yukitools_rime.models import (
     ProblemConfig,
     ProblemSettings,
@@ -169,6 +171,22 @@ def test_snapshot_comparison_partitions_all_names(
         len(changes.changed),
         len(changes.removed),
     )
+
+
+@settings(max_examples=100, deadline=None)
+@example(b"")
+@given(st.binary(max_size=64))
+def test_nonempty_input_and_arbitrary_output_round_trip(output_data: bytes) -> None:
+    with TemporaryDirectory() as temporary:
+        directory = Path(temporary)
+        (directory / "sample.in").write_bytes(b"input")
+        (directory / "sample.diff").write_bytes(output_data)
+
+        snapshot = read_testcases(directory)
+
+    assert snapshot == {
+        "sample": CaseData("sample", b"input", output_data),
+    }
 
 
 @settings(max_examples=150, deadline=None)

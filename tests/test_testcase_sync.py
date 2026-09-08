@@ -138,7 +138,10 @@ def test_fetch_rejects_unsafe_names_but_preserves_empty_remote_bytes() -> None:
     with pytest.raises(ValidationError):
         fetch_remote_snapshot(FakeAPI({"bad name": b"x"}, {"bad name": b"y"}), 42)
     snapshot = fetch_remote_snapshot(FakeAPI({"a": b""}, {"a": b"y"}), 42)
+    zero_output = fetch_remote_snapshot(FakeAPI({"a": b"x"}, {"a": b""}), 42)
+
     assert snapshot["a"] == case("a", b"", b"y")
+    assert zero_output["a"] == case("a", b"x", b"")
 
 
 def test_detail_fetch_reuses_matching_bodies_and_downloads_only_changes() -> None:
@@ -472,12 +475,26 @@ def test_pull_without_difference_does_not_need_prompt(tmp_path: Path) -> None:
     assert not result.changes.has_changes
 
 
+def test_pull_initializes_zero_byte_remote_output(tmp_path: Path) -> None:
+    target = tmp_path / "cases"
+    api = DetailedAPI({"sample": b"input"}, {"sample": b""})
+
+    result = pull_testcases(api, 42, target)
+
+    assert result.applied
+    assert result.remote_snapshot == {"sample": case("sample", b"input", b"")}
+    assert (target / "sample.in").read_bytes() == b"input"
+    assert (target / "sample.diff").read_bytes() == b""
+    assert api.gets == [("in", "sample"), ("out", "sample")]
+
+
 def test_batching_honors_count_size_and_oversize() -> None:
     files = {f"{index:03}.txt": b"x" for index in range(201)}
     assert [len(batch) for batch in batch_upload_files(files)] == [100, 100, 1]
     size = MULTIPART_FILE_OVERHEAD + len("a") + 1
     assert len(batch_upload_files({"a": b"x", "b": b"x"}, max_bytes=size)) == 2
     assert batch_upload_files({"a": b"xx"}, max_bytes=size) == ({"a": b"xx"},)
+    assert batch_upload_files({"empty": b""}, max_bytes=1) == ({"empty": b""},)
 
 
 @pytest.mark.parametrize("kind", ["missing", "incomplete", "nonregular"])
@@ -540,6 +557,39 @@ def test_push_uses_detail_hashes_and_downloads_only_server_adjustments(
     assert "remote-only" not in result.remote_snapshot
     assert (target / "sample.in").read_bytes() == b"new\n"
     assert (target / "sample.diff").read_bytes() == b"same-out"
+
+
+def test_push_accepts_zero_byte_output_and_refreshes_server_normalization(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "cases"
+    write_case(target, case("sample", b"input", b""))
+    api = DetailedAPI({"sample": b"input"}, {"sample": b"old-output"})
+    upload = api.upload_testcases
+
+    def normalize_empty_output(
+        problem_id: int,
+        which: Which | str,
+        files: Mapping[str, bytes],
+    ) -> object:
+        response = upload(problem_id, which, files)
+        if FakeAPI.side(which) == "out":
+            for name, content in files.items():
+                assert content == b""
+                api.data["out"][name] = b"\n"
+        return response
+
+    api.upload_testcases = normalize_empty_output  # type: ignore[method-assign]
+
+    result = push_testcases(api, 42, target)
+
+    assert result.uploaded_inputs == 0
+    assert result.uploaded_outputs == 1
+    assert api.uploads == [("out", ("sample",))]
+    assert api.gets == [("out", "sample")]
+    assert result.remote_snapshot["sample"].output == b"\n"
+    assert (target / "sample.in").read_bytes() == b"input"
+    assert (target / "sample.diff").read_bytes() == b"\n"
 
 
 def test_push_without_prune_does_not_import_remote_only_case(tmp_path: Path) -> None:
