@@ -65,6 +65,10 @@ def test_parser_exposes_exact_commands_and_options() -> None:
         "generate": True,
         "no_wait_compile": True,
     }
+    submit = parser.parse_args(["submit", "solution", "--force", "--no-wait"])
+    assert submit.solution == "solution"
+    assert submit.force is True
+    assert submit.no_wait is True
     solution = parser.parse_args(["solution", "42", "a", "--summary", "accepted"])
     assert solution.submission_id == 42
     assert solution.summary == "accepted"
@@ -348,9 +352,11 @@ def test_submit_wait_flag_and_timeout_warning(
 ) -> None:
     monkeypatch.setattr(cli, "resolve_target", lambda target: object())
     waits: list[bool] = []
+    forces: list[bool] = []
 
     def fake_submit(*args: object, **kwargs: object) -> SimpleNamespace:
         waits.append(bool(kwargs["wait"]))
+        forces.append(bool(kwargs["force"]))
         return SimpleNamespace(
             problem_id=1,
             submission_id=99,
@@ -363,12 +369,13 @@ def test_submit_wait_flag_and_timeout_warning(
     stdin, stdout, stderr = streams()
     assert cli.main(["submit"], stdin=stdin, stdout=stdout, stderr=stderr) == 0
     assert waits == [True]
+    assert forces == [False]
     assert "10分待っても" in stderr.getvalue()
 
     stdin, stdout, stderr = streams()
     assert (
         cli.main(
-            ["submit", "--no-wait"],
+            ["submit", "--force", "--no-wait"],
             stdin=stdin,
             stdout=stdout,
             stderr=stderr,
@@ -376,6 +383,34 @@ def test_submit_wait_flag_and_timeout_warning(
         == 0
     )
     assert waits == [True, False]
+    assert forces == [False, True]
+
+
+def test_submit_reports_existing_id_without_claiming_a_new_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cli, "resolve_target", lambda target: object())
+    captured: dict[str, object] = {}
+
+    def fake_submit(*args: object, **kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            problem_id=1,
+            submission_id=99,
+            already_submitted=True,
+        )
+
+    monkeypatch.setattr(cli, "submit_solution", fake_submit)
+    stdin, stdout, stderr = streams()
+
+    assert cli.main(["submit"], stdin=stdin, stdout=stdout, stderr=stderr) == 0
+    output = stdout.getvalue()
+    assert captured["force"] is False
+    assert "提出済みです: 問題 1, 提出ID 99" in output
+    assert "https://yukicoder.me/submissions/99" in output
+    assert "--force" in output
+    assert "提出しました" not in output
+    assert stderr.getvalue() == ""
 
 
 def test_submit_reports_id_before_wait_failure(

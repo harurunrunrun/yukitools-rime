@@ -115,6 +115,9 @@ def build_parser() -> argparse.ArgumentParser:
     command = commands.add_parser("submit", help="RimeのSOLUTIONを提出する")
     command.add_argument("solution", nargs="?", default=".", metavar="SOLUTION")
     command.add_argument("--no-wait", action="store_true", help="ジャッジ結果を待たない")
+    command.add_argument(
+        "--force", action="store_true", help="提出済みでも再提出してIDを上書きする"
+    )
 
     command = commands.add_parser("solution", help="提出を想定解として登録または解除する")
     command.add_argument("submission_id", type=_positive_int, metavar="提出ID")
@@ -352,8 +355,20 @@ def _dispatch(
                 resolve_target(args.solution),
                 cast(SubmissionClientFactory, problem_factory),
                 wait=not args.no_wait,
+                force=args.force,
                 on_submitted=report_submitted,
             )
+            if getattr(submit_result, "already_submitted", False):
+                _line(
+                    stdout,
+                    (
+                        f"提出済みです: 問題 {submit_result.problem_id}, "
+                        f"提出ID {submit_result.submission_id}"
+                    ),
+                )
+                _line(stdout, f"https://yukicoder.me/submissions/{submit_result.submission_id}")
+                _line(stdout, "再提出する場合は --force を指定してください。")
+                return 0
             if submit_result.submission_id is None:
                 _line(stdout, f"提出しました: 問題 {submit_result.problem_id}")
                 _line(stderr, "警告: 提出IDをサーバー応答から判別できませんでした。")

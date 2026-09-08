@@ -26,6 +26,7 @@ from yukitools_rime.models import (
 from yukitools_rime.rime_config import TestsetConfig as RimeTestsetConfig
 from yukitools_rime.rime_config import (
     parse_problem_config,
+    parse_solution_config,
     parse_testset_config,
     render_problem_block,
     render_project_block,
@@ -262,6 +263,25 @@ def test_stateful_transport_round_trip_across_cli_api_and_filesystem(
     assert "結果: AC (7 ms)" in stdout
     assert stderr == ""
     assert any(b'print("hello")\n' in body for body in remote.submitted_bodies)
+    stored_solution = parse_solution_config((solution / "SOLUTION").read_text(encoding="utf-8"))
+    assert stored_solution.submission_id == 321
+    assert len(remote.submitted_bodies) == 1
+
+    code, stdout, stderr = invoke(["submit", str(solution)])
+    assert code == 0
+    assert "提出済みです: 問題 42, 提出ID 321" in stdout
+    assert "--force" in stdout
+    assert stderr == ""
+    assert len(remote.submitted_bodies) == 1
+
+    code, stdout, stderr = invoke(["submit", str(solution), "--force", "--no-wait"])
+    assert code == 0
+    assert "提出しました: 問題 42, 提出ID 321" in stdout
+    assert "提出済みです" not in stdout
+    assert stderr == ""
+    assert len(remote.submitted_bodies) == 2
+    forced_solution = parse_solution_config((solution / "SOLUTION").read_text(encoding="utf-8"))
+    assert forced_solution.submission_id == 321
 
     code, stdout, stderr = invoke(["solution", "321", str(project), "--summary", "official"])
     assert code == 0
