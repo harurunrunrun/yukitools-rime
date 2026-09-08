@@ -49,6 +49,7 @@ from yukitools_rime.rime_config import (
     render_testset_block,
     upsert_managed_block,
 )
+from yukitools_rime.source_bundle import bundle_program_source
 from yukitools_rime.source_languages import default_source_name, infer_rime_kind
 from yukitools_rime.testcase_sync import (
     SnapshotChanges,
@@ -312,6 +313,33 @@ def _append_mutation(mutations: list[_Mutation], path: Path, data: bytes | None)
         mutations.append(mutation)
 
 
+def _append_program_mutation(
+    mutations: list[_Mutation],
+    problem: ProblemLayout,
+    source_path: Path,
+    config: GeneratorConfig | JudgeConfig | ValidatorConfig,
+    remote_source: str,
+) -> None:
+    normalized = normalize_text(remote_source)
+    if source_path.exists() or source_path.is_symlink():
+        local_source = read_text(source_path)
+        local_upload = bundle_program_source(
+            problem.path.parent,
+            source_path,
+            config.rime_options,
+            rime_kind=config.rime_kind,
+        )
+        if local_upload == normalized:
+            _append_mutation(mutations, source_path, local_source.encode("utf-8"))
+            return
+        if config.rime_options.get("dependency"):
+            raise ConflictError(
+                "refusing to flatten a dependency-backed Rime source during pull: "
+                f"{source_path}; use diff and reconcile the remote source manually"
+            )
+    _append_mutation(mutations, source_path, normalized.encode("utf-8"))
+
+
 def _update_document(
     mutations: list[_Mutation],
     problem: ProblemLayout,
@@ -435,10 +463,12 @@ def _build_pull_plan(
         if existing is None and (source_path.exists() or source_path.is_symlink()):
             raise ConflictError(f"refusing to overwrite existing generator source: {source_path}")
         testset.generator = config
-        _append_mutation(
+        _append_program_mutation(
             mutations,
+            problem,
             source_path,
-            normalize_text(generator.source).encode("utf-8"),
+            config,
+            generator.source,
         )
 
     judge = remote.judge
@@ -464,10 +494,12 @@ def _build_pull_plan(
             judge_source_path.exists() or judge_source_path.is_symlink()
         ):
             raise ConflictError(f"refusing to overwrite existing judge source: {judge_source_path}")
-        _append_mutation(
+        _append_program_mutation(
             mutations,
+            problem,
             judge_source_path,
-            normalize_text(judge.source).encode("utf-8"),
+            judge_config,
+            judge.source,
         )
 
     validator = remote.validator
@@ -500,10 +532,12 @@ def _build_pull_plan(
             raise ConflictError(
                 f"refusing to overwrite existing validator source: {validator_source_path}"
             )
-        _append_mutation(
+        _append_program_mutation(
             mutations,
+            problem,
             validator_source_path,
-            normalize_text(validator.source).encode("utf-8"),
+            validator_config,
+            validator.source,
         )
 
     testset = TestsetConfig(testset.generator, testset.judge, testset.validator)
@@ -703,6 +737,21 @@ def _source_text(path: Path) -> str:
     return read_text(path)
 
 
+def _program_source(
+    problem: ProblemLayout,
+    path: Path,
+    config: GeneratorConfig | JudgeConfig | ValidatorConfig,
+) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise FileOperationError(f"source is not a regular file: {path}")
+    return bundle_program_source(
+        problem.path.parent,
+        path,
+        config.rime_options,
+        rime_kind=config.rime_kind,
+    )
+
+
 def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> ProblemDiffResult:
     problem = remote.problem
     entries: list[DiffEntry] = []
@@ -743,7 +792,9 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
     generator = remote.generator
     if generator is None or not generator.source.strip():
         if testset.generator is not None:
-            local_source = _source_text(testset_path / testset.generator.src)
+            local_source = _program_source(
+                problem, testset_path / testset.generator.src, testset.generator
+            )
             if local_source.strip():
                 entries.append(DiffEntry("generator", "registered locally but empty remotely"))
         warnings.append(f"problem {problem.problem_id}: remote generator is unavailable or empty")
@@ -768,7 +819,7 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
         unified = _unified(
             local_generator.src,
             generator.source,
-            _source_text(testset_path / local_generator.src),
+            _program_source(problem, testset_path / local_generator.src, local_generator),
         )
         if unified:
             entries.append(DiffEntry("generator", "source differs", unified))
@@ -778,7 +829,7 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
         warnings.append(f"problem {problem.problem_id}: remote judge API is unavailable")
     elif not judge.source.strip():
         if testset.judge is not None:
-            local_source = _source_text(testset_path / testset.judge.src)
+            local_source = _program_source(problem, testset_path / testset.judge.src, testset.judge)
             if local_source.strip():
                 entries.append(DiffEntry("judge", "registered locally but empty remotely"))
         warnings.append(f"problem {problem.problem_id}: remote judge is empty")
@@ -796,7 +847,7 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
         unified = _unified(
             local_judge.src,
             judge.source,
-            _source_text(testset_path / local_judge.src),
+            _program_source(problem, testset_path / local_judge.src, local_judge),
         )
         if unified:
             entries.append(DiffEntry("judge", "source differs", unified))
@@ -804,7 +855,9 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
     validator = remote.validator
     if not validator.source.strip():
         if testset.validator is not None:
-            local_source = _source_text(testset_path / testset.validator.src)
+            local_source = _program_source(
+                problem, testset_path / testset.validator.src, testset.validator
+            )
             if local_source.strip():
                 entries.append(DiffEntry("validator", "registered locally but empty remotely"))
             warnings.append(
@@ -824,7 +877,7 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
         unified = _unified(
             local_validator.src,
             validator.source,
-            _source_text(testset_path / local_validator.src),
+            _program_source(problem, testset_path / local_validator.src, local_validator),
         )
         if unified:
             entries.append(DiffEntry("validator", "source differs", unified))

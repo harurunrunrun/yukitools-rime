@@ -47,6 +47,7 @@ from yukitools_rime.models import (
     Which,
 )
 from yukitools_rime.rime_config import parse_problem_config, parse_testset_config
+from yukitools_rime.source_bundle import bundle_program_source
 from yukitools_rime.testcase_sync import (
     RemoteTestcaseHashes,
     RemoteTestcaseSides,
@@ -309,13 +310,20 @@ def _document(problem: ProblemLayout, stem: str, *, required: bool) -> Statement
 
 
 def _local_program(
+    project_root: Path,
     testset_path: Path,
     config: GeneratorConfig | JudgeConfig | ValidatorConfig | None,
 ) -> _LocalProgram | None:
     if config is None:
         return None
     source_path = require_regular_file(testset_path, config.src, label="program source")
-    return _LocalProgram(config, read_text(source_path))
+    source = bundle_program_source(
+        project_root,
+        source_path,
+        config.rime_options,
+        rime_kind=config.rime_kind,
+    )
+    return _LocalProgram(config, source)
 
 
 def _preflight_local(
@@ -334,9 +342,10 @@ def _preflight_local(
     validator: _LocalProgram | None = None
     if current.testset is not None:
         testset = parse_testset_config(read_text(current.testset.config_path))
-        generator = _local_program(current.testset.path, testset.generator)
-        judge = _local_program(current.testset.path, testset.judge)
-        validator = _local_program(current.testset.path, testset.validator)
+        project_root = current.path.parent
+        generator = _local_program(project_root, current.testset.path, testset.generator)
+        judge = _local_program(project_root, current.testset.path, testset.judge)
+        validator = _local_program(project_root, current.testset.path, testset.validator)
     if generate and generator is None:
         raise ValidationError(
             f"{current.path}: --generate requires a local yukicoder_generator declaration"

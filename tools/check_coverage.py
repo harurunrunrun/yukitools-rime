@@ -21,6 +21,7 @@ REQUIRED_FILES = (
     "src/yukitools_rime/commands/sync.py",
     "src/yukitools_rime/testcase_sync.py",
     "src/yukitools_rime/commands/push.py",
+    "src/yukitools_rime/source_bundle.py",
 )
 
 
