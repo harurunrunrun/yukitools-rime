@@ -22,7 +22,7 @@ python3 --version  # 3.11 以上であることを確認
 python3 -m venv ~/.venvs/yukitools-rime
 . ~/.venvs/yukitools-rime/bin/activate
 python -m pip install --upgrade pip
-VERSION=0.1.3
+VERSION=0.1.4
 python -m pip install "https://github.com/harurunrunrun/yukitools-rime/releases/download/v${VERSION}/yukitools_rime-${VERSION}-py3-none-any.whl"
 yukitools-rime --version
 yukitools-rime --help
@@ -45,7 +45,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip build
 python -m build
-python -m pip install --force-reinstall dist/yukitools_rime-0.1.3-py3-none-any.whl
+python -m pip install --force-reinstall dist/yukitools_rime-0.1.4-py3-none-any.whl
 yukitools-rime --version
 yukitools-rime --help
 ~~~
@@ -73,7 +73,7 @@ Release版は新しいRelease番号を `VERSION` へ指定して更新します�
 
 ~~~console
 . ~/.venvs/yukitools-rime/bin/activate
-VERSION=0.1.3
+VERSION=0.1.4
 python -m pip install --upgrade "https://github.com/harurunrunrun/yukitools-rime/releases/download/v${VERSION}/yukitools_rime-${VERSION}-py3-none-any.whl"
 yukitools-rime --version
 ~~~
@@ -86,7 +86,7 @@ clone版はcloneしたディレクトリへ移動し、次のように更新し�
 . .venv/bin/activate
 git pull --ff-only
 python -m build
-python -m pip install --upgrade --force-reinstall dist/yukitools_rime-0.1.3-py3-none-any.whl
+python -m pip install --upgrade --force-reinstall dist/yukitools_rime-0.1.4-py3-none-any.whl
 yukitools-rime --version
 ~~~
 
@@ -189,8 +189,12 @@ submission_id へ保存します。submission_id が既にある場合、通常�
 保存済み ID と URL を表示して終了します。再提出するには --force を指定してください。
 新しい ID を取得できた場合だけ保存済み ID を上書きするため、応答から ID を判別できない
 場合は以前の値を保持します。--no-wait を指定した場合も、提出 ID を保存してから待たずに
-終了します。再提出防止を手動で解除する場合は submission_id=None に戻します。solution は
-既存提出を想定解として登録または解除します。testcases は
+終了します。再提出防止を手動で解除する場合は submission_id=None に戻します。
+submission_id のない既存の SOLUTION は、そのまま利用できます。以前の版で行った
+提出は自動検出しないため、必要なら正の提出 ID を手動で設定してください。SOLUTION
+は Git 管理対象なので、保存された ID を commit すると共有先でも再提出防止が
+有効になります。
+solution は既存提出を想定解として登録または解除します。testcases は
 本文を取らず remote の名前だけを表示します。languages は匿名 API を使うため、
 プロジェクト外でも実行できます。
 
