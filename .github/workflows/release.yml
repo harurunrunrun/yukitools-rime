@@ -171,6 +171,11 @@ jobs:
       - name: Verify archives and fresh installations
         run: python tools/verify_distribution.py --dist-dir dist --rime-dir ../rime
 
+      - name: Test all sample problems with reference Rime
+        run: |
+          python -m pip install -e ".[dev]"
+          RIME_REFERENCE_DIR=../rime python -m pytest tests/test_samples.py -W error --import-mode=importlib
+
       - name: Store release artifacts
         uses: actions/upload-artifact@v7
         with:

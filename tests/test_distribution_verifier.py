@@ -187,6 +187,12 @@ def test_support_sources_are_exactly_expected_in_sdist_not_wheel() -> None:
         "MANIFEST.in",
         "tools/check_coverage.py",
         "tools/verify_distribution.py",
+        "sample/README.md",
+        "sample/PROJECT",
+        "sample/normal/subtask.json",
+        "sample/special/tests/judge.py",
+        "sample/interactive/tests/TESTSET",
+        "sample/interactive/tests/judge.py",
     }
     assert support_sources <= source_names
     assert spec.test_files
@@ -201,4 +207,4 @@ def test_support_sources_are_exactly_expected_in_sdist_not_wheel() -> None:
 
     wheel_files = _VERIFIER._wheel_expected_files(spec)
     assert "MANIFEST.in" not in wheel_files
-    assert all(not member.startswith(("tests/", "tools/")) for member in wheel_files)
+    assert all(not member.startswith(("tests/", "tools/", "sample/")) for member in wheel_files)

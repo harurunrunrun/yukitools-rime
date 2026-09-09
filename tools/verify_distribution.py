@@ -160,6 +160,15 @@ def _load_project(root: Path) -> ProjectSpec:
     source_files.update(test_sources)
     source_files.update(_regular_python_tree(root, "tools"))
     test_files = frozenset(test_sources)
+    sample_names = {"PROJECT", "PROBLEM", "TESTSET", "SOLUTION", ".gitignore", ".env.example"}
+    for path in sorted((root / "sample").rglob("*")):
+        sample_relative = path.relative_to(root)
+        if "rime-out" in sample_relative.parts or "__pycache__" in sample_relative.parts:
+            continue
+        if path.is_symlink():
+            raise VerificationError(f"sample source must not be a symlink: {path}")
+        if path.is_file() and (path.name in sample_names or path.suffix in {".py", ".md", ".json"}):
+            source_files[sample_relative.as_posix()] = path
 
     archive_stem = re.sub(r"[-_.]+", "_", name)
     return ProjectSpec(
