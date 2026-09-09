@@ -173,7 +173,7 @@ jobs:
 
       - name: Test all sample problems with reference Rime
         run: |
-          python -m pip install -e ".[dev]"
+          python -m pip install -e ".[dev]" ../rime
           RIME_REFERENCE_DIR=../rime python -m pytest tests/test_samples.py -W error --import-mode=importlib
 
       - name: Store release artifacts
