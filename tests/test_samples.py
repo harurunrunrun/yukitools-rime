@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,60 @@ def load_interactor():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def statement_samples(name: str) -> list[tuple[str, str]]:
+    source = (SAMPLE / name / "statement.md").read_text(encoding="utf-8")
+    return re.findall(
+        r"@in 入力\s+<pre>(.*?)</pre>\s+@out 出力\s+<pre>(.*?)</pre>",
+        source,
+        re.DOTALL,
+    )
+
+
+@pytest.mark.parametrize("name", ["normal", "special", "interactive"])
+def test_sample_statements_follow_yukicoder_markup(name: str) -> None:
+    source = (SAMPLE / name / "statement.md").read_text(encoding="utf-8")
+    assert source.startswith("## 問題文\n")
+    for marker in ("## @input 入力", "<subtask />", "## 出力", "## @samples サンプル"):
+        assert source.count(marker) == 1
+    for index in range(1, 4):
+        assert f"@sample サンプル{index}\n" in source
+    assert "改行" in source
+    assert "```" not in source
+    # Only the intended HTML tags may contain a literal '<'; math uses \\lt/\\gt.
+    assert re.search(r"<(?!/?pre>|subtask />)", source) is None
+    assert len(statement_samples(name)) == 3
+
+
+def test_normal_statement_samples_match_reference_solution() -> None:
+    for testcase, expected in statement_samples("normal"):
+        result = run_script(SAMPLE / "normal" / "solution" / "main.py", data=testcase)
+        assert result.returncode == 0 and result.stdout == expected
+
+
+def test_special_statement_samples_are_accepted(tmp_path: Path) -> None:
+    for index, (testcase, answer) in enumerate(statement_samples("special")):
+        case = tmp_path / f"sample_{index}.in"
+        case.write_text(testcase, encoding="utf-8", newline="\n")
+        result = run_script(
+            SAMPLE / "special" / "tests" / "judge.py",
+            str(case),
+            "unused-answer",
+            "unused-code",
+            "unused-score",
+            data=answer,
+        )
+        assert result.returncode == 0
+
+
+def test_interactive_statement_samples_are_valid_dialogues() -> None:
+    for secret, (judge_lines, answer_lines) in zip(
+        (42, 1, 100), statement_samples("interactive"), strict=True
+    ):
+        output = io.StringIO()
+        assert load_interactor().interact(secret, io.StringIO(answer_lines), output)
+        assert output.getvalue() == judge_lines
 
 
 def test_sample_layout_is_offline_and_contains_no_generated_cases() -> None:

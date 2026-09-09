@@ -9,6 +9,11 @@ Linux / WSL、Python 3.11以上、Rime `bce5de3` で動作確認する3問です
 | special | スペシャルジャッジ | 正の整数の組、異なる2つの正解・誤答、出力検証器 |
 | interactive | インタラクティブ | 秘密の整数の二分探索、対話ジャッジ、ローカル接続、正解・誤答 |
 
+問題文はyukicoder用の `@input`、`@samples`、`@sample/@in/@out` に対応し、
+入力形式・サンプルは `<pre>`、数式はMathJax表記を使います。不等号には
+`\lt` / `\gt` を使い、HTMLタグと衝突する裸の `<` を書かないようにします。
+各問に3つのサンプルを置き、解答・ジャッジ・対話ロジックとの一致もテストします。
+
 各問に `PROBLEM`、問題文・解説、`tests/TESTSET`、generator、validator、
 `solution/SOLUTION` と解答ソースがあります。`wrong/` は意図的な誤答で、
 `challenge_cases` によりRimeが「誤答を検出できること」も検証します。
