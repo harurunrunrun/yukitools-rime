@@ -1,0 +1,6 @@
+# BEGIN YUKITOOLS-RIME
+yukicoder_solution(
+    lang_id="python3", src="main.py", rime_kind="script",
+    challenge_cases=["sample_01.in", "sample_02.in", "sample_03.in"],
+)
+# END YUKITOOLS-RIME

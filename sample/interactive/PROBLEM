@@ -1,0 +1,20 @@
+# Placeholder ID: replace before any explicit remote command.
+# BEGIN YUKITOOLS-RIME
+yukicoder_problem(
+    problem_id=3,
+    title="Guess the Secret",
+    tags="sample",
+    level=1.0,
+    time_limit_ms=5000,
+    memory_limit=512,
+    eps_mode="-",
+    eps="0",
+    wip=True,
+    recruiting_tester=False,
+    problem_type=0,
+    judge_type=2,
+    rime_id="C",
+    reference_solution="solution",
+    sync=False,
+)
+# END YUKITOOLS-RIME

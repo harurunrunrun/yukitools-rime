@@ -1,0 +1,3 @@
+# BEGIN YUKITOOLS-RIME
+yukicoder_solution(lang_id="python3", src="main.py", rime_kind="script")
+# END YUKITOOLS-RIME

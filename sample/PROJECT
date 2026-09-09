@@ -1,0 +1,8 @@
+use_plugin("rime_plus")
+
+# BEGIN YUKITOOLS-RIME
+from yukitools_rime.rime_plugin import install, yukicoder_project
+
+install()
+yukicoder_project(base_url="https://yukicoder.me/api", rime_out_dir="rime-out")
+# END YUKITOOLS-RIME

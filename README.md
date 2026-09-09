@@ -142,6 +142,14 @@ contest/
 rime-out/ 以下の生成済みテストケースは一切 Git で管理しません。init が
 .gitignore の管理ブロックへ .env と rime-out/ を追加します。
 
+## 作問用の雛形
+
+[sample/README.md](sample/README.md) に、通常ジャッジ・スペシャルジャッジ・
+インタラクティブの3問を用意しています。問題文、generator、validator、
+正解・誤答、必要なjudgeを含み、`cd sample && rime test` でローカル検証できます。
+通常ジャッジには `subtask.json` の例もあります。ケース本体は実行時に生成します。
+転用時は、雛形READMEの手順で仮の問題IDと認証設定を必ず変更してください。
+
 ## コマンド一覧
 
 | コマンド | 用途 |

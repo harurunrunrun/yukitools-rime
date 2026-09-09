@@ -1,0 +1,7 @@
+# This generator is local-only. Upload the results with push --testcases.
+script_generator("generator.py")
+
+# BEGIN YUKITOOLS-RIME
+yukicoder_validator(lang_id="python3", src="validator.py", rime_kind="script")
+yukicoder_judge(lang_id="python3", src="judge.py", rime_kind="script")
+# END YUKITOOLS-RIME

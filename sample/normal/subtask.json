@@ -1,0 +1,19 @@
+{
+  "subtasks": [
+    {
+      "name": "Small",
+      "prefixes": [
+        "small"
+      ],
+      "score": 30,
+      "description": "|A|, |B| <= 10"
+    },
+    {
+      "name": "Large",
+      "prefixes": [
+        "large"
+      ],
+      "score": 70
+    }
+  ]
+}
