@@ -96,6 +96,8 @@ class RemoteState:
     submitted_bodies: list[bytes] = field(default_factory=list)
     validator_source: str = ""
     validator_requests: list[dict[str, object]] = field(default_factory=list)
+    subtasks: dict[str, object] = field(default_factory=lambda: {"subtasks": []})
+    subtask_warning: str = ""
 
     def problem_payload(self) -> dict[str, object]:
         return {
@@ -156,6 +158,11 @@ class RemoteState:
                     "cases": [],
                 },
             )
+        if request.method == "GET" and path == "/api/v1/problems/42/subtask":
+            return httpx.Response(200, json=self.subtasks)
+        if request.method == "PUT" and path == "/api/v1/problems/42/subtask":
+            self.subtasks = decode_json(request)
+            return httpx.Response(200, json={"Message": "saved", "Warning": self.subtask_warning})
         if request.method == "GET" and path == "/api/v1/problems/42/editorial":
             return httpx.Response(200, json={})
         if request.method == "GET" and path == "/api/v1/problems/42/file/in":
@@ -426,6 +433,10 @@ class NewProblemRemote:
                     "showable": True,
                 },
             )
+        if request.method == "GET" and path == "/api/v1/problems/77/subtask":
+            return httpx.Response(
+                200, json={"subtasks": [{"name": "full", "prefixes": ["all"], "score": 100}]}
+            )
         if request.method == "GET" and path == "/api/v1/problems/77/generator":
             return httpx.Response(
                 200,
@@ -497,6 +508,9 @@ def test_cli_init_then_new_crosses_real_client_serialization_and_filesystem(
     assert config.settings.title == "Remote title"
     assert config.settings.time_limit_ms == 2500
     assert (problem / "statement.md").read_bytes() == b"# Remote statement\n"
+    assert json.loads((problem / "subtask.json").read_text(encoding="utf-8")) == {
+        "subtasks": [{"name": "full", "prefixes": ["all"], "score": 100}]
+    }
     assert testset.generator is not None
     assert testset.generator.lang_id == "python3"
     assert testset.generator.src == "generator.py"
@@ -517,6 +531,7 @@ def test_cli_init_then_new_crosses_real_client_serialization_and_filesystem(
         ("GET", "/api/v1/problems/77/generator"),
         ("GET", "/api/v1/problems/77/code"),
         ("GET", "/api/v1/problems/77/validator"),
+        ("GET", "/api/v1/problems/77/subtask"),
     ]
     assert all(
         request.headers.get("authorization") == f"Bearer {TOKEN}" for request in remote.requests
@@ -681,6 +696,174 @@ def test_cli_push_repairs_only_output_after_partial_http_upload(
     assert len(detail_requests) >= 4
     assert body_downloads == []
     assert len(clients) == 2
+    assert all(client._http.is_closed for client in clients)
+
+
+def test_subtask_cli_round_trip_clear_missing_and_dry_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    problem, _ = make_project(tmp_path / "project")
+    subtask_path = problem / "subtask.json"
+    remote = RemoteState(statement="local statement\n")
+    clients = install_authenticated_transport(monkeypatch, httpx.MockTransport(remote))
+    monkeypatch.setenv("YUKICODER_TOKEN_42", TOKEN)
+
+    assert invoke(["pull", str(problem)])[0] == 0
+    assert not subtask_path.exists()
+    remote.subtasks = {"subtasks": [{"prefixes": ["small"], "score": 100, "name": "小"}]}
+    code, stdout, _ = invoke(["diff", str(problem), "--exit-code"])
+    assert code == 3 and "subtask.json: missing locally" in stdout
+    assert not subtask_path.exists()
+    assert invoke(["pull", str(problem)])[0] == 0
+    assert json.loads(subtask_path.read_text(encoding="utf-8")) == remote.subtasks
+    same = {"subtasks": [{"score": 100, "prefixes": ["small"], "description": "", "name": "小"}]}
+    subtask_path.write_text(json.dumps(same), encoding="utf-8")
+    before = (subtask_path.read_bytes(), subtask_path.stat().st_mtime_ns)
+    assert invoke(["diff", str(problem), "--exit-code"])[0] == 0
+    assert (subtask_path.read_bytes(), subtask_path.stat().st_mtime_ns) == before
+    remote.requests.clear()
+    assert invoke(["push", str(problem)])[0] == 0
+    assert all(request.method == "GET" for request in remote.requests)
+
+    subtask_path.write_text('{"subtasks": []}', encoding="utf-8")
+    code, stdout, _ = invoke(["diff", str(problem), "--exit-code"])
+    assert code == 3 and "yukicoder/subtask.json" in stdout
+    code, stdout, _ = invoke(["push", str(problem), "--dry-run"])
+    assert code == 0 and "problem 42 subtask" in stdout
+    assert remote.subtasks["subtasks"]
+    code, stdout, _ = invoke(["push", str(problem)])
+    assert code == 0 and "完了: problem 42 subtask" in stdout
+    assert remote.subtasks == {"subtasks": []}
+
+    remote.subtasks = same
+    subtask_path.unlink()
+    remote.requests.clear()
+    assert invoke(["push", str(problem)])[0] == 0
+    assert remote.subtasks == same
+    assert not any("/subtask" in str(request.url) for request in remote.requests)
+
+    assert invoke(["pull", str(problem)])[0] == 0
+    remote.subtasks = {"subtasks": []}
+    assert invoke(["pull", str(problem)])[0] == 0
+    assert json.loads(subtask_path.read_text(encoding="utf-8")) == {"subtasks": []}
+    assert not any("/file/" in str(request.url) for request in remote.requests)
+    assert all(client._http.is_closed for client in clients)
+
+
+@pytest.mark.parametrize("command", ["push", "diff"])
+def test_subtask_invalid_json_is_rejected_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    problem, _ = make_project(tmp_path / "project")
+    (problem / "subtask.json").write_text('{"subtasks": [{"score": 30}]}', encoding="utf-8")
+    remote = RemoteState()
+    clients = install_authenticated_transport(monkeypatch, httpx.MockTransport(remote))
+    monkeypatch.setenv("YUKICODER_TOKEN_42", TOKEN)
+    code, _, stderr = invoke([command, str(problem)])
+    assert code == 1 and "invalid subtask JSON" in stderr
+    assert all(request.method == "GET" for request in remote.requests)
+    if command == "push":
+        assert remote.requests == [] and clients == []
+
+
+@pytest.mark.parametrize("status", [200, 403, 404, 500])
+def test_subtask_fetch_failure_does_not_partially_pull(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    problem, _ = make_project(tmp_path / "project")
+    remote = RemoteState()
+    before = {p.name: p.read_bytes() for p in problem.iterdir() if p.is_file()}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/subtask"):
+            return httpx.Response(status, json={"subtasks": None})
+        return remote(request)
+
+    clients = install_authenticated_transport(monkeypatch, httpx.MockTransport(handler))
+    monkeypatch.setenv("YUKICODER_TOKEN_42", TOKEN)
+    assert invoke(["pull", str(problem)])[0] == 1
+    assert {p.name: p.read_bytes() for p in problem.iterdir() if p.is_file()} == before
+    assert all(client._http.is_closed for client in clients)
+
+
+def test_subtask_pull_atomic_write_failure_rolls_back_other_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import yukitools_rime.commands.sync as sync
+    from yukitools_rime.errors import FileOperationError
+
+    problem, _ = make_project(tmp_path / "project")
+    subtask_path = problem / "subtask.json"
+    # Pull can also repair an invalid local JSON file.
+    subtask_path.write_bytes(b"invalid old JSON")
+    remote = RemoteState(subtasks={"subtasks": [{"prefixes": ["all"], "score": 100}]})
+    install_authenticated_transport(monkeypatch, httpx.MockTransport(remote))
+    monkeypatch.setenv("YUKICODER_TOKEN_42", TOKEN)
+    before = {p.name: p.read_bytes() for p in problem.iterdir() if p.is_file()}
+    writer = sync.atomic_write_bytes
+    failed = False
+
+    def fail_subtask(path: Path, data: bytes) -> None:
+        nonlocal failed
+        if path == subtask_path and not failed:
+            failed = True
+            raise FileOperationError("injected subtask write failure")
+        writer(path, data)
+
+    monkeypatch.setattr(sync, "atomic_write_bytes", fail_subtask)
+    code, _, stderr = invoke(["pull", str(problem)])
+    assert code == 1 and "injected subtask write failure" in stderr
+    assert {p.name: p.read_bytes() for p in problem.iterdir() if p.is_file()} == before
+    assert invoke(["pull", str(problem)])[0] == 0
+    assert json.loads(subtask_path.read_text(encoding="utf-8")) == remote.subtasks
+
+
+def test_subtask_upload_follows_testcases_and_retries_after_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    problem, _ = make_testcase_project(tmp_path / "project")
+    tasks = {"subtasks": [{"prefixes": ["sample"], "score": 100}]}
+    (problem / "subtask.json").write_text(json.dumps(tasks), encoding="utf-8")
+    remote = _TestcaseRemote(statement="local statement\n", subtask_warning="no matching cases")
+    writes = []
+    fail = True
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal fail
+        if request.method != "GET":
+            writes.append(request.url.path)
+        if request.method == "PUT" and request.url.path.endswith("/subtask") and fail:
+            fail = False
+            return httpx.Response(500)
+        return remote(request)
+
+    clients = install_authenticated_transport(monkeypatch, httpx.MockTransport(handler))
+    monkeypatch.setenv("YUKICODER_TOKEN_42", TOKEN)
+    monkeypatch.setattr(cli, "push", partial(cli.push, testcase_refresh_delay=0.0))
+    code, _, stderr = invoke(["push", str(problem), "--testcases"])
+    assert code == 1
+    assert "problem 42 subtask failed" in stderr
+    assert "testcase normalization refresh" in stderr
+    assert writes == [
+        "/api/v1/problems/42/file/in",
+        "/api/v1/problems/42/file/out",
+        "/api/v1/problems/42/subtask",
+    ]
+    assert remote.subtasks == {"subtasks": []}
+    writes.clear()
+    code, stdout, stderr = invoke(["push", str(problem), "--testcases"])
+    assert code == 0
+    assert "完了: problem 42 subtask" in stdout
+    assert "no matching cases" in stderr
+    assert writes == ["/api/v1/problems/42/subtask"]
+    assert remote.subtasks == tasks
     assert all(client._http.is_closed for client in clients)
 
 

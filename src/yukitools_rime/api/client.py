@@ -30,6 +30,8 @@ from yukitools_rime.api.types import (
     SolutionRequest,
     StatusInfo,
     SubmissionInfo,
+    SubtaskSaveResponse,
+    SubtaskSet,
     TestcaseInfo,
     TestcaseNameRule,
     UploadResponse,
@@ -363,6 +365,22 @@ class YukicoderClient:
         )
 
     get_problem = get_problem_edit
+
+    def get_subtask(self, problem_id: int) -> SubtaskSet:
+        pid = _path_id(problem_id, "問題ID")
+        return SubtaskSet.from_api_dict(
+            self._get_json(f"/v1/problems/{pid}/subtask", "部分点の取得")
+        )
+
+    def save_subtask(self, problem_id: int, request: SubtaskSet) -> SubtaskSaveResponse:
+        pid = _path_id(problem_id, "問題ID")
+        validated = SubtaskSet.from_api_dict(request.to_api_dict())
+        operation = "部分点の保存"
+        return _parse_write_response(
+            self._put_json(f"/v1/problems/{pid}/subtask", validated, operation),
+            operation,
+            SubtaskSaveResponse.from_api_dict,
+        )
 
     def save_problem_edit(
         self,

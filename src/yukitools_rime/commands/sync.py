@@ -15,6 +15,7 @@ from yukitools_rime.api.types import (
     GeneratorContent,
     JudgeCodeContent,
     ProblemEditContent,
+    SubtaskSet,
     ValidatorContent,
 )
 from yukitools_rime.errors import ConflictError, FileOperationError, LayoutError, ValidationError
@@ -51,6 +52,7 @@ from yukitools_rime.rime_config import (
 )
 from yukitools_rime.source_bundle import bundle_program_source
 from yukitools_rime.source_languages import default_source_name, infer_rime_kind
+from yukitools_rime.subtasks import SubtaskClient, fetch_subtasks, read_subtasks, render_subtasks
 from yukitools_rime.testcase_sync import (
     SnapshotChanges,
     TestcaseAPI,
@@ -62,7 +64,7 @@ from yukitools_rime.testcase_sync import (
 )
 
 
-class SyncClient(TestcaseAPI, Protocol):
+class SyncClient(TestcaseAPI, SubtaskClient, Protocol):
     """Remote operations required by both pull and diff."""
 
     def get_problem_edit(self, problem_id: int) -> ProblemEditContent: ...
@@ -167,6 +169,7 @@ class _RemoteProblem:
     editorial: EditorialContent
     testcases: TestcaseSnapshot | None
     validator: ValidatorContent = field(default_factory=ValidatorContent)
+    subtasks: SubtaskSet = field(default_factory=SubtaskSet)
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +245,7 @@ def _fetch_remote(
         judge = client.get_judge_code(problem.problem_id)
         validator = _get_validator(client, problem.problem_id)
         editorial = client.get_editorial(problem.problem_id)
+        subtasks = fetch_subtasks(client, problem.problem_id)
         if include_testcases:
             if testcase_staging is None:
                 raise ValueError("testcase staging is required when fetching testcases")
@@ -274,6 +278,7 @@ def _fetch_remote(
                 editorial,
                 testcases,
                 validator,
+                subtasks,
             )
         )
     return tuple(fetched)
@@ -559,6 +564,9 @@ def _build_pull_plan(
         remote.editorial.is_markdown,
         only_if_present=True,
     )
+    subtask_path = problem.path / "subtask.json"
+    if remote.subtasks.subtasks or subtask_path.exists() or subtask_path.is_symlink():
+        _append_mutation(mutations, subtask_path, render_subtasks(remote.subtasks).encode("utf-8"))
     testcase_changes, apply_testcases, testcase_dir = _plan_testcases(
         remote, project_config, confirm
     )
@@ -785,6 +793,23 @@ def _diff_problem(remote: _RemoteProblem, project_config: ProjectConfig) -> Prob
                 remote.editorial.content,
                 remote.editorial.is_markdown,
                 local_editorial,
+            )
+        )
+
+    local_subtasks = read_subtasks(problem.path)
+    if local_subtasks is None:
+        if remote.subtasks.subtasks:
+            entries.append(DiffEntry("subtask.json", "missing locally"))
+    elif local_subtasks != remote.subtasks:
+        entries.append(
+            DiffEntry(
+                "subtask.json",
+                "content differs",
+                _unified(
+                    "subtask.json",
+                    render_subtasks(remote.subtasks),
+                    render_subtasks(local_subtasks),
+                ),
             )
         )
 

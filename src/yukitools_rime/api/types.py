@@ -9,6 +9,66 @@ from typing import Any, cast
 from yukitools_rime.errors import ValidationError
 from yukitools_rime.models import ProblemSettings, Statement, Which
 
+
+@dataclass(frozen=True, slots=True)
+class Subtask:
+    prefixes: tuple[str, ...]
+    score: int
+    name: str = ""
+    description: str = ""
+
+    def to_api_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {"prefixes": list(self.prefixes), "score": self.score}
+        if self.name:
+            data["name"] = self.name
+        if self.description:
+            data["description"] = self.description
+        return data
+
+
+@dataclass(frozen=True, slots=True)
+class SubtaskSet:
+    subtasks: tuple[Subtask, ...] = ()
+
+    @classmethod
+    def from_api_dict(cls, raw: object) -> SubtaskSet:
+        data = _mapping(raw, "subtask")
+        values = data.get("subtasks")
+        if not isinstance(values, list):
+            raise ResponseFormatError("subtasks must be an array")
+        subtasks: list[Subtask] = []
+        for value in values:
+            item = _mapping(value, "subtask")
+            prefixes = item.get("prefixes")
+            if not isinstance(prefixes, list) or any(
+                not isinstance(prefix, str) for prefix in prefixes
+            ):
+                raise ResponseFormatError("subtask prefixes must be an array of strings")
+            score = _required_integer(item, "score")
+            if not 0 <= score <= 100:
+                raise ResponseFormatError("subtask score must be between 0 and 100")
+            subtasks.append(
+                Subtask(tuple(prefixes), score, _string(item, "name"), _string(item, "description"))
+            )
+        if subtasks and sum(task.score for task in subtasks) != 100:
+            raise ResponseFormatError("subtask scores must total 100")
+        return cls(tuple(subtasks))
+
+    def to_api_dict(self) -> dict[str, object]:
+        return {"subtasks": [task.to_api_dict() for task in self.subtasks]}
+
+
+@dataclass(frozen=True, slots=True)
+class SubtaskSaveResponse:
+    message: str = ""
+    warning: str = ""
+
+    @classmethod
+    def from_api_dict(cls, raw: object) -> SubtaskSaveResponse:
+        data = _mapping({} if raw is None else raw, "subtask save")
+        return cls(_string(data, "Message"), _string(data, "Warning"))
+
+
 JUDGE_STATUS_OK = "AC"
 JUDGE_STATUS_COMPILE_ERROR = "CE"
 STATUS_CATEGORY_JUDGING = "judging"

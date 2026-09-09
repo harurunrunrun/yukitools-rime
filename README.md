@@ -123,6 +123,7 @@ contest/
     PROBLEM
     statement.md | statement.html
     editorial.md | editorial.html
+    subtask.json                 # 部分点設定（任意、Git 管理）
     tests/
       TESTSET
       generator.cpp
@@ -170,7 +171,7 @@ generator/validator/judge は設定とソース、ケースは名前と生バイ
 通常は差分があっても終了 0、--exit-code 指定時は差分があれば終了 3 です。
 
 push は全対象を事前検証し、変更がある問題本体、generator、judge、解説、
-テストケース、validator だけを送ります。validator はテストケースの更新・削除と
+テストケース、部分点設定、validator だけを送ります。validator はテストケースの更新・削除と
 サーバー正規化後に処理し、変更がないソースは再送しません。validator が登録済みなら、
 ケースだけを変更した場合も再検証結果を待ちます。AC 以外はコンパイルメッセージまたは
 失敗ケースを表示して終了 1、時間切れは警告になります。
@@ -202,6 +203,36 @@ submission_id のない既存の SOLUTION は、そのまま利用できます�
 solution は既存提出を想定解として登録または解除します。testcases は
 本文を取らず remote の名前だけを表示します。languages は匿名 API を使うため、
 プロジェクト外でも実行できます。
+
+## 部分点設定（subtask.json）
+
+`PROBLEM` と同じディレクトリに `subtask.json` を置きます。
+yukicoder_tools v0.5.0 と同じ `GET/PUT /v1/problems/{id}/subtask` API を使用します。
+設定例（テストケース本体ではないため、このJSONはGit管理できます）:
+
+~~~json
+{
+  "subtasks": [
+    {"name": "小さい入力", "prefixes": ["small"], "score": 30, "description": "小さい制約"},
+    {"name": "全制約", "prefixes": ["large"], "score": 70}
+  ]
+}
+~~~
+
+`prefixes` は文字列の配列、`score` は0〜100の整数で、空でない設定の合計は100です。
+`name` と `description` は省略できます。未知キー、重複キー、不正JSONは拒否します。
+名前の対応はサーバー仕様に従い、たとえば `small_01` は `small` に属します。
+単純な文字列の先頭一致ではありません。複数prefixの指定はサーバーの分類ルールを
+確認して設定してください。
+
+- `new` / `pull`: 部分点設定も取得します。未設定かつローカルにもない場合は
+  ファイルを作りません。既存ファイルは空設定も含めてremoteに合わせ、
+  他の問題ファイルと同じロールバック対象にします。
+- `diff`: JSONの空白やキー順によらず内容を比較し、差があればunified diffを表示します。
+- `push`: ファイルがある場合だけ比較し、変更分を送ります。ファイルがない場合は
+  remoteの設定を変更しません。明示的に解除するには `{"subtasks": []}` を保存します。
+- `push --testcases`: ケース更新・削除・正規化の後、validatorの前に部分点を保存します。
+  サーバーの `Warning` も表示します。部分点だけの同期に `--testcases` は不要です。
 
 ## TARGET と終了コード
 

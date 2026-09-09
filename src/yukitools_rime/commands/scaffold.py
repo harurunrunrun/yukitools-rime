@@ -58,6 +58,7 @@ from yukitools_rime.rime_config import (
     write_config_atomic,
 )
 from yukitools_rime.source_languages import source_spec
+from yukitools_rime.subtasks import fetch_subtasks, render_subtasks
 from yukitools_rime.testcase_sync import (
     TestcaseAPI,
     TestcaseSnapshot,
@@ -476,6 +477,7 @@ def new_problem(
                 include_testcases=include_testcases,
                 testcase_stage=testcase_stage,
             )
+            subtasks = fetch_subtasks(client, problem_id)
         finally:
             _close_client(client)
 
@@ -488,6 +490,8 @@ def new_problem(
                 )
             )
             _write_problem_stage(stage, *resources, project.config)
+            if subtasks.subtasks:
+                atomic_write_text(stage / "subtask.json", render_subtasks(subtasks))
             if target.exists() or target.is_symlink():
                 raise ConflictError(f"problem directory appeared during creation: {target}")
             os.replace(stage, target)

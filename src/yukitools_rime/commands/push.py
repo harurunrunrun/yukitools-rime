@@ -21,6 +21,8 @@ from yukitools_rime.api.types import (
     ProblemEditContent,
     ProblemEditRequest,
     StatusInfo,
+    SubtaskSaveResponse,
+    SubtaskSet,
     UploadResponse,
     ValidatorContent,
     ValidatorRequest,
@@ -48,6 +50,7 @@ from yukitools_rime.models import (
 )
 from yukitools_rime.rime_config import parse_problem_config, parse_testset_config
 from yukitools_rime.source_bundle import bundle_program_source
+from yukitools_rime.subtasks import SubtaskClient, fetch_subtasks, read_subtasks
 from yukitools_rime.testcase_sync import (
     RemoteTestcaseHashes,
     RemoteTestcaseSides,
@@ -60,7 +63,7 @@ from yukitools_rime.testcase_sync import (
 )
 
 
-class PushClient(TestcaseAPI, Protocol):
+class PushClient(TestcaseAPI, SubtaskClient, Protocol):
     """Remote operations needed by push."""
 
     def get_problem_edit(self, problem_id: int) -> ProblemEditContent: ...
@@ -86,6 +89,8 @@ class PushClient(TestcaseAPI, Protocol):
     def save_validator(
         self, problem_id: int, request: ValidatorRequest
     ) -> JudgeCodeSaveResponse: ...
+
+    def save_subtask(self, problem_id: int, request: SubtaskSet) -> SubtaskSaveResponse: ...
 
     def statuses(self) -> list[StatusInfo]: ...
 
@@ -194,6 +199,7 @@ class _LocalProblem:
     testcase_dir: Path | None
     testcases: Mapping[str, TestCaseData] | None
     validator: _LocalProgram | None = None
+    subtasks: SubtaskSet | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +239,7 @@ class _ProblemPlan:
     testcases: _TestcasePlan | None
     validator: _ValidatorPlan | None = None
     judge_judging: frozenset[str] = frozenset()
+    subtask_request: SubtaskSet | None = None
 
     @property
     def planned_items(self) -> tuple[str, ...]:
@@ -260,6 +267,8 @@ class _ProblemPlan:
                     items.append(f"{prefix} delete testcase output {name}")
             if testcases.has_uploads:
                 items.append(f"{prefix} testcase normalization refresh")
+        if self.subtask_request is not None:
+            items.append(f"{prefix} subtask")
         if self.validator is not None and self.validator.request is not None:
             items.append(f"{prefix} validator")
         return tuple(items)
@@ -377,6 +386,7 @@ def _preflight_local(
         testcase_dir,
         testcases,
         validator,
+        read_subtasks(current.path),
     )
 
 
@@ -541,6 +551,10 @@ def _build_remote_plan(
         )
         testcase_plan = _testcase_plan(local, remote_cases, prune=prune)
 
+    subtask_request = None
+    if local.subtasks is not None and local.subtasks != fetch_subtasks(client, problem_id):
+        subtask_request = local.subtasks
+
     validator_plan: _ValidatorPlan | None = None
     if local.validator is not None:
         validator_config = local.validator.config
@@ -581,6 +595,7 @@ def _build_remote_plan(
         testcase_plan,
         validator_plan,
         judge_judging=server_judging if server_judging is not None else frozenset(),
+        subtask_request=subtask_request,
     )
 
 
@@ -889,6 +904,16 @@ def _execute_plan(
                 completed,
                 refresh,
             )
+
+    if plan.subtask_request is not None:
+        label = f"{prefix} subtask"
+        subtask_response = _perform(
+            label,
+            completed,
+            partial(plan.client.save_subtask, problem_id, plan.subtask_request),
+        )
+        if subtask_response.warning.strip():
+            warnings.append(f"{label}: {subtask_response.warning.strip()}")
 
     validator = plan.validator
     if validator is not None:
