@@ -12,4 +12,4 @@ CASES = {
 
 if __name__ == "__main__":
     for name, (a, b) in CASES.items():
-        Path(f"{name}.in").write_text(f"{a} {b}\n", encoding="utf-8")
+        Path(f"{name}.in").write_text(f"{a} {b}\n", encoding="utf-8", newline="\n")

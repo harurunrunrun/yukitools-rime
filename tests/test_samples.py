@@ -18,15 +18,20 @@ SAMPLE = ROOT / "sample"
 
 
 def run_script(path: Path, *args: str, data: str = "", cwd: Path | None = None):
-    return subprocess.run(
+    # Binary stdin avoids Windows TextIOWrapper translating testcase newlines.
+    result = subprocess.run(
         [sys.executable, str(path), *args],
-        input=data,
+        input=data.encode("utf-8"),
         cwd=cwd,
         capture_output=True,
-        text=True,
-        encoding="utf-8",
         check=False,
         timeout=10,
+    )
+    return subprocess.CompletedProcess(
+        result.args,
+        result.returncode,
+        result.stdout.decode("utf-8").replace("\r\n", "\n"),
+        result.stderr.decode("utf-8").replace("\r\n", "\n"),
     )
 
 
@@ -68,6 +73,7 @@ def test_sample_generators_validate_and_are_deterministic(tmp_path: Path, name: 
     assert run_script(tests / "generator.py", cwd=tmp_path).returncode == 0
     first = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
     assert len(first) >= 3 and all(p.endswith(".in") for p in first)
+    assert all(b"\r" not in contents and contents.endswith(b"\n") for contents in first.values())
     assert run_script(tests / "generator.py", cwd=tmp_path).returncode == 0
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == first
     for contents in first.values():
