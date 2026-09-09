@@ -182,6 +182,11 @@ CLI は rime test を自動実行しないため、ローカル生成ケース�
 CI が Rime を実行してください。remote 更新は非トランザクションであり、途中失敗
 時には完了済みリソースを確認してから再実行してください。
 
+提出結果の自動待機（`--no-wait` を付けない `submit`）は、yukicoder の
+サイトサポーター限定APIを利用します。サイトサポーターではない場合は
+`yukitools-rime submit --no-wait` で提出し、結果をWebサイトで確認してください。
+`--no-wait` でも提出IDは `SOLUTION` に保存されます。
+
 submit は所属問題、ソース、yukicoder の lang_id を yukicoder_solution() から
 取得し、既定では最大 10 分、5 秒間隔でジャッジ結果を待って status と実行時間を表示します。
 提出が受理されて正の提出 ID を取得すると、判定待ちより先に SOLUTION の
